@@ -393,6 +393,35 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
     Ok(())
 }
 
+/// Spawn a process detached from the current client session, with no console
+/// window.
+///
+/// On Windows, `DETACHED_PROCESS` makes a console-subsystem child (python.exe,
+/// cmd.exe) allocate a BRAND NEW console window, which flashes on the user's
+/// desktop and steals focus. `CREATE_NO_WINDOW` is ignored when combined with
+/// `DETACHED_PROCESS`, so it must be used INSTEAD of it. `CREATE_NO_WINDOW`
+/// also gives the child no inherited console, which is the detachment we want.
+///
+/// Use this for invisible background children (hooks). Use `spawn_detached`
+/// when the child is meant to own a visible terminal window.
+pub fn spawn_detached_no_window(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        return spawn_detached(cmd);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        cmd.spawn()
+    }
+}
+
 /// Spawn a process detached from the current client session.
 ///
 /// This is used for launching new terminal windows (for `/resume`, `/split`,
