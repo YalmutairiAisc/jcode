@@ -1022,7 +1022,7 @@ impl BashTool {
             cmd.current_dir(dir);
         }
 
-        let mut child = crate::platform::spawn_detached(&mut cmd)?;
+        let mut child = crate::platform::spawn_detached_no_window(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
 

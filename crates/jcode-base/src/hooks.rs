@@ -204,6 +204,15 @@ fn build_hook_process(
         .expect("parse_hook_command guarantees at least one part");
     let mut cmd = std::process::Command::new(expand_home(program));
     cmd.args(args);
+    #[cfg(windows)]
+    {
+        // Hook processes run on every tool call. Without CREATE_NO_WINDOW each
+        // one allocates a fresh console, flashing a cmd/python window on the
+        // user's desktop and stealing focus.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty())
         && std::path::Path::new(cwd).is_dir()
     {
@@ -232,7 +241,7 @@ pub fn dispatch_observer(event: HookEvent) {
                 cmd.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
-                match crate::platform::spawn_detached(&mut cmd) {
+                match crate::platform::spawn_detached_no_window(&mut cmd) {
                     Ok(_) => crate::logging::debug(&format!(
                         "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
                         event.session_id
