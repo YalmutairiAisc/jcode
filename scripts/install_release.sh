@@ -64,7 +64,18 @@ if [[ -n "$git_hash" ]]; then
 else
   cargo build --profile "$profile" --manifest-path "$repo_root/Cargo.toml"
 fi
-bin="$repo_root/target/$profile/jcode"
+# Windows (git-bash/MSYS) produces jcode.exe, and its real install tree is
+# %LOCALAPPDATA%\jcode, not ~/.jcode/builds. Detect that up front.
+exe_suffix=""
+is_windows=0
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    exe_suffix=".exe"
+    is_windows=1
+    ;;
+esac
+
+bin="$repo_root/target/$profile/jcode${exe_suffix}"
 
 if [[ ! -x "$bin" ]]; then
   echo "Release binary not found: $bin" >&2
@@ -80,6 +91,59 @@ if [[ -n "$git_hash" ]]; then
     echo "Release binary does not report expected git identity: $expected_git_identity" >&2
     exit 1
   fi
+fi
+
+if [[ "$is_windows" == "1" ]]; then
+  # On Windows the binaries that actually run live under %LOCALAPPDATA%\jcode:
+  # `bin` is the launcher the TUI starts from, and `builds/shared-server` is the
+  # daemon. The Unix layout below (~/.jcode/builds + symlinks) is NOT executed
+  # here, so installing only there left both real binaries stale while still
+  # reporting success.
+  local_app_data="${LOCALAPPDATA:-$HOME/AppData/Local}"
+  # Normalise a Windows-style path (C:\Users\...) into the MSYS form.
+  if [[ "$local_app_data" == *'\'* ]]; then
+    local_app_data="$(cygpath -u "$local_app_data")"
+  fi
+  win_root="$local_app_data/jcode"
+
+  install_windows_binary() {
+    local target="$1"
+    mkdir -p "$(dirname "$target")"
+    # A running .exe cannot be overwritten on Windows, so rotate it aside first
+    # and restore it if the copy fails.
+    local rotated=""
+    if [[ -e "$target" ]]; then
+      rotated="${target}.old-$(date +%s)"
+      mv -f "$target" "$rotated"
+    fi
+    if ! cp -f "$bin" "$target"; then
+      if [[ -n "$rotated" ]]; then
+        mv -f "$rotated" "$target"
+        echo "Copy failed; restored previous binary: $target" >&2
+      fi
+      exit 1
+    fi
+    chmod 755 "$target"
+    echo "Installed: $target"
+  }
+
+  install_windows_binary "$win_root/bin/jcode.exe"
+  install_windows_binary "$win_root/builds/shared-server/jcode.exe"
+
+  install_dir="$win_root/bin"
+
+  # Reload any running daemon onto what we just installed. --force is required
+  # because the staleness check compares binary mtimes, and an in-place rebuild
+  # of the server's own path can leave it looking "not strictly newer".
+  if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
+    if "$install_dir/jcode.exe" server reload --force </dev/null >/dev/null 2>&1; then
+      echo "Reloaded the running jcode server onto $hash (if one was active)."
+    fi
+  fi
+
+  echo ""
+  echo "Restart your jcode TUI to pick up $hash."
+  exit 0
 fi
 
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
