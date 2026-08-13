@@ -49,6 +49,12 @@ if [[ "$is_windows" == 1 ]]; then
   # Both real Windows binaries must be written, not just the launcher.
   test -x "$tmp/localappdata/jcode/bin/jcode.exe"
   test -x "$tmp/localappdata/jcode/builds/shared-server/jcode.exe"
+  test -x "$tmp/localappdata/jcode/builds/current/jcode.exe"
+  test -x "$tmp/localappdata/jcode/builds/stable/jcode.exe"
+  # Bookkeeping must move with the binaries, or every version report lies.
+  for marker in current-version stable-version shared-server-version; do
+    test "$(cat "$tmp/localappdata/jcode/builds/$marker")" = abc123def-dirty
+  done
 else
   test -x "$tmp/home/.jcode/builds/versions/abc123def-dirty/jcode"
   test "$(cat "$tmp/home/.jcode/builds/current-version")" = abc123def-dirty

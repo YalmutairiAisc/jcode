@@ -129,6 +129,18 @@ if [[ "$is_windows" == "1" ]]; then
 
   install_windows_binary "$win_root/bin/jcode.exe"
   install_windows_binary "$win_root/builds/shared-server/jcode.exe"
+  # The `current` and `stable` channels are read by the updater and by
+  # `selfdev status`; leaving them behind made both report an older hash than
+  # the binary that actually runs.
+  install_windows_binary "$win_root/builds/current/jcode.exe"
+  install_windows_binary "$win_root/builds/stable/jcode.exe"
+
+  # Marker files are the bookkeeping the updater compares against. Without
+  # these the install "succeeds" while every version report stays stale.
+  for marker in current-version stable-version shared-server-version; do
+    printf '%s\n' "$hash" > "$win_root/builds/$marker"
+  done
+  echo "Updated channel markers to $hash."
 
   install_dir="$win_root/bin"
 
