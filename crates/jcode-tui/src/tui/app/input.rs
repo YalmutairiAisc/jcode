@@ -89,6 +89,15 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
 fn build_input_shell_command(command: &str) -> std::process::Command {
     #[cfg(windows)]
     {
+        // The same shell the `bash` tool uses. Leaving this on cmd.exe would
+        // mean the agent's `ls | wc -l` works while the human's `!ls | wc -l`
+        // silently mangles -- two halves of one session disagreeing about
+        // what a shell is.
+        if let Some(shell) = jcode_app_core::tool::windows_posix_shell() {
+            let mut cmd = std::process::Command::new(shell);
+            cmd.arg("-c").arg(command);
+            return cmd;
+        }
         let mut cmd = std::process::Command::new("cmd.exe");
         cmd.arg("/C").arg(command);
         cmd

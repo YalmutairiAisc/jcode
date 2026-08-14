@@ -80,7 +80,7 @@ const GIT_BASH_CANDIDATES: &[&str] = &[
 /// a falsy value, or when the configured path does not exist -- a missing shell
 /// must not silently become "no shell". `auto` probes the known locations.
 #[cfg(windows)]
-fn windows_posix_shell() -> Option<std::path::PathBuf> {
+pub fn windows_posix_shell() -> Option<std::path::PathBuf> {
     let raw = std::env::var(WINDOWS_SHELL_ENV).ok()?;
     let raw = raw.trim();
     if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "0" | "false" | "cmd" | "off")
