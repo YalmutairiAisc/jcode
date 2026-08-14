@@ -2,6 +2,14 @@ mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod bash;
+/// The POSIX shell selected by `JCODE_WINDOWS_SHELL`, if any.
+///
+/// Public because the TUI crate needs it too: the `!command` input-line escape
+/// must resolve the SAME shell as the `bash` tool. Two copies would drift, and
+/// a user typing `!ls | wc -l` after watching the agent run it would be a
+/// confusing way to discover that.
+#[cfg(windows)]
+pub use bash::windows_posix_shell;
 mod batch;
 mod bg;
 mod browser;

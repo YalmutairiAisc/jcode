@@ -36,6 +36,14 @@ fn derive_subagent_description(prompt: &str) -> String {
 fn build_input_shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
+        // Same shell as the `bash` tool. If the agent can run `ls | wc -l` but
+        // the human's `!ls | wc -l` silently mangles, the two halves of the
+        // same session disagree about what a shell is.
+        if let Some(shell) = crate::tool::windows_posix_shell() {
+            let mut cmd = Command::new(shell);
+            cmd.arg("-c").arg(command);
+            return cmd;
+        }
         let mut cmd = Command::new("cmd.exe");
         cmd.arg("/C").arg(command);
         cmd
