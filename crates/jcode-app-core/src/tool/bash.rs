@@ -1083,6 +1083,35 @@ mod windows_posix_shell_tests {
         }
     }
 
+    /// The bug this fixes, end to end: config alone, no environment variable.
+    ///
+    /// The unit test above proves the resolver returns a path. This proves the
+    /// SPAWNED SHELL is really POSIX, which is what the user experiences. Same
+    /// `$HOME` discriminator: bash expands it, cmd.exe never does, on any
+    /// machine and under any PATH.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn config_alone_spawns_a_posix_shell() {
+        if installed_git_bash().is_none() {
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = IsolatedConfig::new();
+        let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
+
+        set_env(None);
+        config.set_windows_shell("auto");
+        let out = build_shell_command("echo V=$HOME").output().await;
+        set_env(previous.as_deref());
+
+        let out = out.expect("spawn shell from config setting");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("$HOME") && stdout.contains("V=/"),
+            "config alone must yield a POSIX shell that expands $HOME; got {stdout:?}"
+        );
+    }
+
     /// The description is the agent's instruction for how to quote; if it
     /// disagrees with the shell actually in use, the agent writes the wrong
     /// syntax for the shell it has.
