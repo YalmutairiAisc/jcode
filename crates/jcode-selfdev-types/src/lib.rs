@@ -27,6 +27,17 @@ pub struct SelfDevBuildCommand {
     pub program: String,
     pub args: Vec<String>,
     pub display: String,
+    /// Environment overrides the build must run with.
+    ///
+    /// `jcode-build-meta/build.rs` refreshes the embedded git hash only when
+    /// `JCODE_BUILD_GIT_HASH` changes (it deliberately does not watch
+    /// `.git/HEAD`, which would force a full-tree recompile on every git op).
+    /// `scripts/dev_cargo.sh` exports that value, but callers that invoke Cargo
+    /// directly -- notably Windows, which cannot use the shell wrapper -- must
+    /// carry it here, or the binary keeps a stale hash and the publish guard
+    /// rejects it forever.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
