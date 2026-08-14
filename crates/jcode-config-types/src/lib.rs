@@ -778,6 +778,24 @@ pub struct TerminalConfig {
     ///
     /// macOS only; ignored on other platforms.
     pub preferred: Option<String>,
+    /// Windows only: shell used by the `bash` tool.
+    ///
+    /// Same values as the `JCODE_WINDOWS_SHELL` environment variable -- a path
+    /// to a shell binary, `auto` to probe the usual git-bash locations, or
+    /// `off`/`cmd` to keep cmd.exe. The environment variable wins when both are
+    /// set, so a one-off `JCODE_WINDOWS_SHELL=off` still overrides the config.
+    ///
+    /// WHY BOTH EXIST. The environment variable alone is a trap on Windows: a
+    /// process receives its environment by copy at creation, so setting a user
+    /// variable does not reach anything already running, nor anything later
+    /// spawned by something already running. Measured 2026-08-14, a jcode
+    /// started an hour AFTER the variable was persisted still did not have it,
+    /// because its parent terminal predated the change -- and the only symptom
+    /// was the `bash` tool quietly staying cmd.exe. Config is read from disk on
+    /// every call, so it cannot go stale that way.
+    ///
+    /// Ignored on non-Windows platforms, where the tool is already bash.
+    pub windows_shell: Option<String>,
 }
 
 /// Lifecycle hooks: external commands jcode runs at well-defined points.
