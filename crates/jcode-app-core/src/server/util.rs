@@ -404,10 +404,46 @@ mod swarm_identity_tests {
 /// We now only report an update when we can read both mtimes and the candidate
 /// is strictly newer than the running binary. Any uncertainty suppresses the
 /// auto-reload signal so it can never wedge the client into a loop.
+///
+/// Production now calls `newer_binary_available_since` directly so it can pass
+/// a real process start time. This zero-start-time wrapper is kept because the
+/// issue #277 regression tests below assert precisely that behaviour: with no
+/// start time available, uncertainty must still suppress the signal.
+#[cfg(test)]
 fn newer_binary_available(
     current_mtime: Option<std::time::SystemTime>,
     current_canonical: Option<&Path>,
     candidates: impl IntoIterator<Item = (PathBuf, Option<std::time::SystemTime>)>,
+) -> bool {
+    newer_binary_available_since(current_mtime, current_canonical, candidates, None)
+}
+
+/// As above, plus `process_start`: when the running process began executing.
+///
+/// This distinguishes the two ways a candidate can share the running binary's
+/// path. `jcode server promote` rewrites `builds/shared-server/jcode.exe` IN
+/// PLACE, so after a promote the reload candidate IS the running daemon's path
+/// while holding entirely different code. A Windows process keeps the image it
+/// was created from, so the daemon goes on running the old build; the self-path
+/// guard refuses forever and `server reload` reports "already running the newest
+/// binary". Measured 2026-08-14: pid 15668, started 16:09:44, still executing
+/// 9aa18d5ce after its own file became 3d9e6c937 at 19:10:04. Only `--force`
+/// could move it, which is not something a user should have to know.
+///
+/// A same-path candidate written after the process started is therefore a real
+/// update. Crucially it is also SELF-CLEARING, which is what separates it from
+/// issue #277: the re-exec'd process starts after the file's mtime, so the very
+/// next evaluation returns false. The #277 loop came from treating an
+/// *inconclusive* comparison as an update, a condition that reloading could
+/// never resolve.
+///
+/// Without a known start time the old, conservative answer stands: uncertainty
+/// must never be able to wedge a client into a loop.
+fn newer_binary_available_since(
+    current_mtime: Option<std::time::SystemTime>,
+    current_canonical: Option<&Path>,
+    candidates: impl IntoIterator<Item = (PathBuf, Option<std::time::SystemTime>)>,
+    process_start: Option<std::time::SystemTime>,
 ) -> bool {
     let Some(current_time) = current_mtime else {
         crate::logging::warn(
@@ -417,13 +453,20 @@ fn newer_binary_available(
     };
 
     candidates.into_iter().any(|(candidate, candidate_mtime)| {
-        // Reloading into ourselves is never an "update".
-        if current_canonical == Some(candidate.as_path()) {
-            return false;
-        }
+        let is_self = current_canonical == Some(candidate.as_path());
 
         match candidate_mtime {
-            Some(candidate_time) => candidate_time > current_time,
+            Some(candidate_time) => {
+                if is_self {
+                    // Same path: only an update if the file was replaced after
+                    // this process loaded its image.
+                    return match process_start {
+                        Some(started) => candidate_time > started,
+                        None => false,
+                    };
+                }
+                candidate_time > current_time
+            }
             None => {
                 crate::logging::warn(&format!(
                     "server_has_newer_binary: candidate mtime unavailable for {}; suppressing auto-reload update signal",
@@ -433,6 +476,61 @@ fn newer_binary_available(
             }
         }
     })
+}
+
+/// When the current process started, if the OS will tell us.
+///
+/// Used only to decide whether a same-path binary was replaced underneath a
+/// running process. Any failure returns `None`, which preserves the
+/// conservative behaviour.
+fn current_process_start_time() -> Option<std::time::SystemTime> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::raw::HANDLE;
+
+        #[allow(non_camel_case_types)]
+        type FILETIME = [u32; 2];
+
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> HANDLE;
+            fn GetProcessTimes(
+                process: HANDLE,
+                creation: *mut FILETIME,
+                exit: *mut FILETIME,
+                kernel: *mut FILETIME,
+                user: *mut FILETIME,
+            ) -> i32;
+        }
+
+        let mut creation: FILETIME = [0, 0];
+        let mut exit: FILETIME = [0, 0];
+        let mut kernel: FILETIME = [0, 0];
+        let mut user: FILETIME = [0, 0];
+        let ok = unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // FILETIME is 100ns ticks since 1601-01-01; convert to UNIX epoch.
+        let ticks = ((creation[1] as u64) << 32) | (creation[0] as u64);
+        const TICKS_1601_TO_1970: u64 = 116_444_736_000_000_000;
+        let unix_ticks = ticks.checked_sub(TICKS_1601_TO_1970)?;
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(unix_ticks * 100))
+    }
+    #[cfg(not(windows))]
+    {
+        // /proc/self/stat field 22 is starttime in clock ticks since boot.
+        // Deriving a wall-clock instant from it needs boot time and the tick
+        // rate; until that is measured on Linux, stay conservative.
+        None
+    }
 }
 
 pub(crate) fn server_has_newer_binary() -> bool {
@@ -488,10 +586,11 @@ pub(crate) fn server_has_newer_binary() -> bool {
         (candidate, candidate_mtime)
     });
 
-    newer_binary_available(
+    newer_binary_available_since(
         current_mtime,
         current_canonical.as_deref(),
         candidates_with_mtimes,
+        current_process_start_time(),
     )
 }
 
@@ -525,7 +624,7 @@ pub(crate) fn startup_headless_recovery_test_delay() -> Option<std::time::Durati
 
 #[cfg(test)]
 mod newer_binary_tests {
-    use super::newer_binary_available;
+    use super::{newer_binary_available, newer_binary_available_since};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -561,6 +660,55 @@ mod newer_binary_tests {
             Some(t(100)),
             Some(std::path::Path::new("/x/current/jcode")),
             candidates,
+        ));
+    }
+
+    /// `jcode server promote` overwrites `builds/shared-server/jcode.exe` IN
+    /// PLACE, so the reload candidate path EQUALS the running daemon's path.
+    /// The self-path guard then refuses forever, and `server reload` answers
+    /// "already running the newest binary" while the daemon keeps executing the
+    /// image it started with -- measured 2026-08-14, pid 15668 started 16:09:44
+    /// still running 9aa18d5ce after its own file was replaced at 19:10:04 with
+    /// 3d9e6c937. Only `--force` could move it.
+    ///
+    /// A same-path candidate written AFTER the process started is a genuine
+    /// update, and unlike issue #277 it is self-clearing: the re-exec'd process
+    /// starts after the file, so the next check reports no update.
+    #[test]
+    fn same_path_binary_written_after_process_start_is_an_update() {
+        let candidates = vec![(PathBuf::from("/x/current/jcode"), Some(t(200)))];
+        assert!(newer_binary_available_since(
+            Some(t(100)),
+            Some(std::path::Path::new("/x/current/jcode")),
+            candidates,
+            Some(t(150)), // process started BEFORE the file was written
+        ));
+    }
+
+    /// The self-clearing half: once the daemon re-execs, it started AFTER the
+    /// file was written, so the same comparison reports no update. This is what
+    /// makes the case above safe where issue #277 was not.
+    #[test]
+    fn same_path_binary_older_than_process_start_is_not_an_update() {
+        let candidates = vec![(PathBuf::from("/x/current/jcode"), Some(t(200)))];
+        assert!(!newer_binary_available_since(
+            Some(t(100)),
+            Some(std::path::Path::new("/x/current/jcode")),
+            candidates,
+            Some(t(300)), // process started AFTER the file was written
+        ));
+    }
+
+    /// Unknown process start time must keep the old, conservative behaviour:
+    /// a same-path candidate is not an update. Uncertainty never loops.
+    #[test]
+    fn same_path_without_process_start_stays_suppressed() {
+        let candidates = vec![(PathBuf::from("/x/current/jcode"), Some(t(999)))];
+        assert!(!newer_binary_available_since(
+            Some(t(100)),
+            Some(std::path::Path::new("/x/current/jcode")),
+            candidates,
+            None,
         ));
     }
 
