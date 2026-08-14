@@ -1010,6 +1010,60 @@ mod windows_posix_shell_tests {
         }
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn off_uses_cmd_and_auto_uses_bash_end_to_end() {
+        // Prove the switch actually changes the SHELL, both directions.
+        //
+        // The discriminator matters. An earlier version of this test used
+        // `echo one | head -1` and FAILED, because cmd.exe ran it fine: cargo
+        // is launched from git-bash, whose PATH includes Git\usr\bin, so
+        // cmd.exe resolves `head` and pipes work. Measured both ways --
+        // without Git\usr\bin on PATH: "'head' is not recognized"; with it:
+        // "one". That test was asserting on PATH, not on the shell, and would
+        // have passed or failed depending on who launched it.
+        //
+        // `$VAR` expansion cannot be faked by PATH: bash expands it, cmd.exe
+        // never does, on any machine. That is a property of the shell itself.
+        use super::build_shell_command;
+
+        let run = |val: &str, cmd: &str| {
+            let val = val.to_string();
+            let cmd = cmd.to_string();
+            async move {
+                // SAFETY: these tests are serialised by ENV_LOCK, and the
+                // variable is removed again before the next await point.
+                unsafe { std::env::set_var("JCODE_WINDOWS_SHELL", &val) };
+                let out = build_shell_command(&cmd).output().await.expect("spawn");
+                unsafe { std::env::remove_var("JCODE_WINDOWS_SHELL") };
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).to_string(),
+                    String::from_utf8_lossy(&out.stderr).to_string(),
+                )
+            }
+        };
+
+        // A POSIX shell expands $HOME; cmd.exe emits the two characters.
+        let (_, out_off, _) = run("off", "echo V=$HOME").await;
+        assert!(
+            out_off.contains("V=$HOME"),
+            "off must stay cmd.exe, which never expands $VAR; got {out_off:?}"
+        );
+
+        if GIT_BASH_CANDIDATES
+            .iter()
+            .any(|p| std::path::Path::new(p).is_file())
+        {
+            let (ok_auto, out_auto, err_auto) = run("auto", "echo V=$HOME").await;
+            assert!(ok_auto, "auto should succeed; stderr={err_auto:?}");
+            assert!(
+                !out_auto.contains("$HOME") && out_auto.contains("V=/"),
+                "auto must be a POSIX shell that expands $HOME; got {out_auto:?}"
+            );
+        }
+    }
+
     /// The description is the agent's instruction for how to quote; if it
     /// disagrees with the shell actually in use, the agent writes the wrong
     /// syntax for the shell it has.
