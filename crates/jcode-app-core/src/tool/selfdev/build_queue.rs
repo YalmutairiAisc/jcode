@@ -100,6 +100,12 @@ export -f cargo
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Carries JCODE_BUILD_GIT_HASH/_DATE. Without it the build script keeps
+        // the hash from the last full rebuild and the publish guard rejects the
+        // binary. See `git_build_metadata_env`.
+        for (key, value) in &command.env {
+            cmd.env(key, value);
+        }
 
         let mut child = cmd
             .spawn()
@@ -1132,6 +1138,9 @@ export -f cargo
                 SelfDevTool::optimized_test_shell_command(&command),
             ],
             display: command.clone(),
+            // `selfdev test` runs a test command; it publishes no binary, so it
+            // needs no embedded git metadata.
+            env: Vec::new(),
         };
         let dedupe_key = format!(
             "test:{}:{}:{}",
@@ -1318,6 +1327,7 @@ mod desktop_binary_tests {
             program: "scripts/dev_cargo.sh".to_string(),
             args: Vec::new(),
             display: display.to_string(),
+            env: Vec::new(),
         }
     }
 

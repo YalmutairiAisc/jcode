@@ -229,6 +229,7 @@ fn selfdev_build_command_for_target_on_platform(
             program: "bash".to_string(),
             args: vec!["-lc".to_string(), command],
             display: display_build_command("scripts/dev_cargo.sh", &specs),
+            env: git_build_metadata_env(repo_dir),
         };
     }
 
@@ -238,6 +239,7 @@ fn selfdev_build_command_for_target_on_platform(
             program: "cargo".to_string(),
             args: cargo_build_args(&specs),
             display: command,
+            env: git_build_metadata_env(repo_dir),
         };
     }
 
@@ -245,7 +247,46 @@ fn selfdev_build_command_for_target_on_platform(
         program: "bash".to_string(),
         args: vec!["-lc".to_string(), command.clone()],
         display: command,
+        env: git_build_metadata_env(repo_dir),
     }
+}
+
+/// Git metadata the build must embed, as explicit environment overrides.
+///
+/// `jcode-build-meta/build.rs` does not watch `.git/HEAD` -- doing so forces a
+/// full-tree recompile on every `git add`/`status`/commit. Instead it declares
+/// `cargo:rerun-if-env-changed=JCODE_BUILD_GIT_HASH`, so passing the *value*
+/// re-runs the build script exactly when HEAD moves and never otherwise.
+///
+/// `scripts/dev_cargo.sh` does this for shell-wrapped builds. Windows invokes
+/// Cargo directly (the wrapper's `bash` may be WSL, which cannot produce a
+/// Windows executable), so without this the embedded hash never refreshes: the
+/// binary reports the commit of its last full rebuild, and the publish guard
+/// rejects it with "binary was built from git hash X, but source state is Y"
+/// on every subsequent commit -- permanently, since nothing else invalidates
+/// the build script.
+///
+/// `JCODE_BUILD_GIT_DIRTY` is deliberately NOT exported: it flips on every edit
+/// and would churn the build script on each build. The publish guard validates
+/// dirty builds through the source fingerprint / mtime path instead.
+fn git_build_metadata_env(repo_dir: &Path) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let mut capture = |key: &str, args: [&str; 3]| {
+        let output = match Command::new("git").args(args).current_dir(repo_dir).output() {
+            Ok(output) if output.status.success() => output,
+            // No git, no repo, or no commit yet: leave the variable unset so the
+            // build script falls back to its own detection rather than baking in
+            // an empty hash.
+            _ => return,
+        };
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            env.push((key.to_string(), value));
+        }
+    };
+    capture("JCODE_BUILD_GIT_HASH", ["rev-parse", "--short", "HEAD"]);
+    capture("JCODE_BUILD_GIT_DATE", ["log", "-1", "--format=%ci"]);
+    env
 }
 
 fn cargo_build_args(specs: &[(&str, &str)]) -> Vec<String> {
@@ -349,10 +390,12 @@ fn shell_escape(value: &str) -> String {
 pub fn run_selfdev_build(repo_dir: &Path) -> Result<SelfDevBuildCommand> {
     let source = super::current_source_state(repo_dir)?;
     let build = selfdev_build_command(repo_dir);
-    let status = Command::new(&build.program)
-        .args(&build.args)
-        .current_dir(repo_dir)
-        .status()?;
+    let mut command = Command::new(&build.program);
+    command.args(&build.args).current_dir(repo_dir);
+    for (key, value) in &build.env {
+        command.env(key, value);
+    }
+    let status = command.status()?;
 
     if !status.success() {
         anyhow::bail!("Build failed: {}", build.display);
@@ -681,6 +724,31 @@ mod tests {
         temp
     }
 
+    /// A fixture with a REAL git repository and one commit, so `HEAD` resolves
+    /// to an actual hash. `repo_fixture` only creates a `.git` directory, which
+    /// is enough for repo detection but has no commit to read a hash from.
+    fn git_repo_with_commit() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("Cargo.toml");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["add", "Cargo.toml"]);
+        git(&["commit", "-m", "init"]);
+        temp
+    }
+
     #[test]
     fn find_repo_in_ancestors_finds_workspace_from_crate_dir() {
         let repo = repo_fixture(false);
@@ -724,6 +792,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The publish guard compares the binary's embedded git hash against
+    /// `current_source_state`. `jcode-build-meta/build.rs` deliberately does not
+    /// watch `.git/HEAD`, so it only refreshes the embedded hash when
+    /// `JCODE_BUILD_GIT_HASH` changes. `scripts/dev_cargo.sh` exports that value,
+    /// but the Windows path invokes Cargo directly and bypasses the wrapper --
+    /// so without this env the binary keeps the hash of whatever commit was
+    /// checked out during the last full rebuild, and `self-dev --build` can
+    /// never publish again. Every platform's command must carry the metadata.
+    #[test]
+    fn build_command_carries_git_metadata_on_every_platform() {
+        let repo = git_repo_with_commit();
+        for is_windows in [true, false] {
+            let command = selfdev_build_command_for_target_on_platform(
+                repo.path(),
+                SelfDevBuildTarget::Tui,
+                is_windows,
+            );
+            let hash = command
+                .env
+                .iter()
+                .find(|(key, _)| key == "JCODE_BUILD_GIT_HASH");
+            assert!(
+                hash.is_some(),
+                "is_windows={is_windows}: build command sets no JCODE_BUILD_GIT_HASH, \
+                 so the binary embeds a stale hash and the publish guard rejects it"
+            );
+        }
+    }
+
+    /// The exported hash must be the repo's actual HEAD. An empty or wrong value
+    /// would satisfy the check above while still embedding the wrong hash.
+    #[test]
+    fn build_command_git_metadata_matches_head() {
+        let repo = git_repo_with_commit();
+        let expected = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .expect("git rev-parse")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_string();
+        assert!(!expected.is_empty(), "fixture produced no HEAD");
+
+        let command = selfdev_build_command_for_target_on_platform(
+            repo.path(),
+            SelfDevBuildTarget::Tui,
+            true,
+        );
+        let actual = command
+            .env
+            .iter()
+            .find(|(key, _)| key == "JCODE_BUILD_GIT_HASH")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(
+            actual,
+            Some(expected.as_str()),
+            "build command must export the current HEAD hash"
+        );
     }
 
     /// A single-target build must not drag in the other binaries: building the
