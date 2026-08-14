@@ -43,6 +43,9 @@ const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
 /// git-bash locations. Unset -- the default -- keeps cmd.exe, so no existing
 /// Windows install changes behaviour.
 ///
+/// `terminal.windows_shell` in config.toml is the same setting, and is what to
+/// prefer: see `windows_shell_setting` for why the variable alone is a trap.
+///
 /// WHY THIS EXISTS. On Windows the tool named `bash` was cmd.exe, which is
 /// surprising in the specific way that costs time: it silently mangles rather
 /// than failing. Measured 2026-08-14 on this machine, all of these EXIT 0 while
@@ -72,14 +75,45 @@ const GIT_BASH_CANDIDATES: &[&str] = &[
     r"C:\Program Files\Git\usr\bin\bash.exe",
 ];
 
+/// The configured shell setting: environment first, then config.toml.
+///
+/// The environment variable wins so a one-off `JCODE_WINDOWS_SHELL=off` can
+/// still override a config value for a single session.
+///
+/// WHY THE CONFIG FALLBACK EXISTS. On Windows a process gets its environment
+/// block by COPY at creation, so persisting a user variable reaches only
+/// processes started later, from a parent that was itself started later.
+/// Measured 2026-08-14 on this machine: the variable was written at 14:38, and
+/// a jcode started at 16:09 still did not have it, because it descended from a
+/// terminal opened at 11:54. `windows_posix_shell()` therefore returned None
+/// and the tool stayed cmd.exe -- with correct config, a correct binary, and no
+/// error anywhere. That is precisely the silent-wrong-answer class this whole
+/// feature exists to remove, so the setting must have a home that cannot go
+/// stale. Config is re-read from disk, so it always reflects what is written.
+#[cfg(windows)]
+fn windows_shell_setting() -> Option<String> {
+    if let Ok(raw) = std::env::var(WINDOWS_SHELL_ENV)
+        && !raw.trim().is_empty()
+    {
+        return Some(raw);
+    }
+    crate::config::config()
+        .terminal
+        .windows_shell
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// The POSIX shell to use for the `bash` tool on Windows, if one is configured.
 ///
-/// Returns `None` when the variable is unset (keep cmd.exe), when it is set to
-/// a falsy value, or when the configured path does not exist -- a missing shell
-/// must not silently become "no shell". `auto` probes the known locations.
+/// Returns `None` when neither the variable nor `terminal.windows_shell` is set
+/// (keep cmd.exe), when the value is falsy, or when the configured path does
+/// not exist -- a missing shell must not silently become "no shell". `auto`
+/// probes the known locations.
 #[cfg(windows)]
 pub fn windows_posix_shell() -> Option<std::path::PathBuf> {
-    let raw = std::env::var(WINDOWS_SHELL_ENV).ok()?;
+    let raw = windows_shell_setting()?;
     let raw = raw.trim();
     if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "0" | "false" | "cmd" | "off")
     {
@@ -787,10 +821,69 @@ mod windows_posix_shell_tests {
         }
     }
 
+    /// Point config at an empty temp dir for the duration of a test.
+    ///
+    /// Since the shell setting also reads config.toml, a test asserting "unset
+    /// means cmd.exe" would otherwise depend on the config of whoever runs it:
+    /// green on CI, red on a machine that has `terminal.windows_shell` set. The
+    /// test must not read the developer's real config.
+    struct IsolatedConfig {
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl IsolatedConfig {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp config dir");
+            let previous = std::env::var_os("JCODE_HOME");
+            // SAFETY: serialised by ENV_LOCK, restored on drop.
+            unsafe { std::env::set_var("JCODE_HOME", dir.path()) };
+            crate::config::invalidate_config_cache();
+            Self {
+                _dir: dir,
+                previous,
+            }
+        }
+
+        /// Write a `[terminal] windows_shell` value into the isolated config.
+        fn set_windows_shell(&self, value: &str) {
+            let path = self._dir.path().join("config.toml");
+            std::fs::write(&path, format!("[terminal]\nwindows_shell = \"{value}\"\n"))
+                .expect("write isolated config");
+            crate::config::invalidate_config_cache();
+        }
+    }
+
+    impl Drop for IsolatedConfig {
+        fn drop(&mut self) {
+            // SAFETY: serialised by ENV_LOCK; restores the prior value.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("JCODE_HOME", value),
+                    None => std::env::remove_var("JCODE_HOME"),
+                }
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+
     fn with_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _config = IsolatedConfig::new();
         let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
         set_env(value);
+        let out = f();
+        set_env(previous.as_deref());
+        out
+    }
+
+    /// Run with the env var absent and a config value present.
+    fn with_config<T>(value: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = IsolatedConfig::new();
+        let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
+        set_env(None);
+        config.set_windows_shell(value);
         let out = f();
         set_env(previous.as_deref());
         out
@@ -846,6 +939,58 @@ mod windows_posix_shell_tests {
                 );
             });
         }
+    }
+
+    /// The config setting must work on its own, with no environment variable.
+    ///
+    /// This is the case that was broken in practice: the variable was set for
+    /// the user, but the running process tree predated it and so never saw it,
+    /// and the tool silently stayed cmd.exe.
+    #[test]
+    fn config_selects_the_shell_when_the_env_var_is_absent() {
+        let Some(expected) = installed_git_bash() else {
+            return;
+        };
+        with_config("auto", || {
+            assert_eq!(
+                windows_posix_shell().as_deref(),
+                Some(std::path::Path::new(expected)),
+                "terminal.windows_shell must select the shell without the env var"
+            );
+        });
+    }
+
+    /// A falsy config value keeps cmd.exe, exactly like the env var.
+    #[test]
+    fn falsy_config_keeps_cmd_exe() {
+        for v in ["off", "cmd", "false", "0"] {
+            with_config(v, || {
+                assert!(
+                    windows_posix_shell().is_none(),
+                    "config {v:?} should mean cmd.exe"
+                );
+            });
+        }
+    }
+
+    /// The environment variable wins, so a one-off override still works.
+    #[test]
+    fn env_var_overrides_the_config_value() {
+        if installed_git_bash().is_none() {
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = IsolatedConfig::new();
+        let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
+
+        config.set_windows_shell("auto");
+        set_env(Some("off"));
+        assert!(
+            windows_posix_shell().is_none(),
+            "an explicit env `off` must beat config `auto`"
+        );
+
+        set_env(previous.as_deref());
     }
 
     /// The four cmd.exe behaviours that made this worth doing. Each EXITS 0
