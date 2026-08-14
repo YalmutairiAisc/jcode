@@ -1,6 +1,32 @@
 use super::*;
 
 impl SelfDevTool {
+    /// The shell `selfdev test` runs the command under.
+    ///
+    /// Plain `"bash"` is resolved through PATH, and on Windows the first
+    /// `bash.exe` on PATH is `System32\bash.exe`: the **WSL launcher**. The
+    /// test command then runs inside a Linux VM, where the Windows toolchain
+    /// does not exist -- measured 2026-08-14, `uname -a` reported
+    /// `Linux ... microsoft-standard-WSL2` and `cargo test` died with
+    /// `cargo: command not found` even though cargo was on the caller's PATH.
+    /// Worse, WSL sees the repo as `/mnt/c/...`, so a command that did find a
+    /// Linux cargo would build a *different* target tree.
+    ///
+    /// The bash tool already solved this with `windows_posix_shell()`, which
+    /// honours the `windows_shell` setting and probes the real git-bash
+    /// locations. Use the same answer here so both spawn the same shell.
+    /// When it returns None the old PATH lookup stands, which is correct on
+    /// unix and is the documented opt-out (`= "off"`) on Windows.
+    pub(super) fn test_shell_program() -> String {
+        #[cfg(windows)]
+        {
+            if let Some(shell) = crate::tool::windows_posix_shell() {
+                return shell.display().to_string();
+            }
+        }
+        "bash".to_string()
+    }
+
     pub(super) fn optimized_test_shell_command(command: &str) -> String {
         format!(
             r#"cargo() {{
@@ -1132,7 +1158,7 @@ export -f cargo
             })?;
         let requested_source = SelfDevTool::requested_source_state(&repo_dir)?;
         let shell_command = SelfDevBuildCommand {
-            program: "bash".to_string(),
+            program: SelfDevTool::test_shell_program(),
             args: vec![
                 "-lc".to_string(),
                 SelfDevTool::optimized_test_shell_command(&command),
@@ -1358,5 +1384,51 @@ mod desktop_binary_tests {
                 "{display} was treated as desktop-only"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_shell_program_tests {
+    use super::*;
+
+    /// The defect: `program: "bash"` is resolved through PATH, and on Windows
+    /// the first `bash.exe` on PATH is `System32\bash.exe`, the WSL launcher.
+    /// `selfdev test` then ran the command inside a Linux VM with no Windows
+    /// toolchain, so `cargo test` reported `cargo: command not found` while
+    /// cargo sat on the caller's PATH the whole time.
+    ///
+    /// Asserting an absolute path is what makes this able to fail: a bare
+    /// `"bash"` is precisely the value that gets hijacked by PATH order.
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_shell_is_never_the_wsl_launcher() {
+        let program = SelfDevTool::test_shell_program();
+
+        // Only meaningful when a POSIX shell is configured; `= "off"` opts out
+        // and legitimately leaves the PATH lookup in place.
+        let Some(expected) = crate::tool::windows_posix_shell() else {
+            return;
+        };
+
+        assert_eq!(
+            program,
+            expected.display().to_string(),
+            "selfdev test must spawn the same shell the bash tool does"
+        );
+        assert!(
+            !program.eq_ignore_ascii_case("bash"),
+            r"a bare `bash` resolves to System32\bash.exe (WSL) on Windows"
+        );
+        assert!(
+            !program.to_ascii_lowercase().contains("system32"),
+            "resolved to the WSL launcher: {program}"
+        );
+    }
+
+    /// On unix the PATH lookup is correct and must be left alone.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_test_shell_stays_a_path_lookup() {
+        assert_eq!(SelfDevTool::test_shell_program(), "bash");
     }
 }
