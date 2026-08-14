@@ -30,9 +30,83 @@ const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
+#[cfg(not(windows))]
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
+#[cfg(windows)]
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+
+/// Opt-in: run the `bash` tool through a real POSIX shell on Windows.
+///
+/// Set `JCODE_WINDOWS_SHELL` to the shell binary (typically
+/// `C:\Program Files\Git\bin\bash.exe`), or to `auto` to probe the usual
+/// git-bash locations. Unset -- the default -- keeps cmd.exe, so no existing
+/// Windows install changes behaviour.
+///
+/// WHY THIS EXISTS. On Windows the tool named `bash` was cmd.exe, which is
+/// surprising in the specific way that costs time: it silently mangles rather
+/// than failing. Measured 2026-08-14 on this machine, all of these EXIT 0 while
+/// doing the wrong thing -- `echo one ; echo two` prints the literal
+/// `one ; echo two`; a multi-line `python -c` prints nothing at all; `echo 'x'`
+/// keeps the quotes; and Arabic arguments become `?????` because cp1252 cannot
+/// represent them, which matters for an Arabic-first codebase. Wrapping each
+/// call in `bash.exe -c '...'` does not fix it: cmd.exe parses the line FIRST,
+/// has no concept of a single quote, and still steals `|`, `&&` and `2>`.
+///
+/// The agent works around this by writing named Python scripts for anything
+/// non-trivial. That is a real cost paid on every command, so make the shell
+/// itself selectable instead.
+#[cfg(windows)]
+const WINDOWS_SHELL_ENV: &str = "JCODE_WINDOWS_SHELL";
+
+#[cfg(windows)]
+const WINDOWS_POSIX_SHELL_TOOL_DESCRIPTION: &str =
+    "Run a bash command (git-bash on Windows). Use Bash syntax: pipes, &&, single quotes and \
+     unix tools all work.";
+
+/// Usual git-bash locations, in the order a Windows install puts them.
+#[cfg(windows)]
+const GIT_BASH_CANDIDATES: &[&str] = &[
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+];
+
+/// The POSIX shell to use for the `bash` tool on Windows, if one is configured.
+///
+/// Returns `None` when the variable is unset (keep cmd.exe), when it is set to
+/// a falsy value, or when the configured path does not exist -- a missing shell
+/// must not silently become "no shell". `auto` probes the known locations.
+#[cfg(windows)]
+fn windows_posix_shell() -> Option<std::path::PathBuf> {
+    let raw = std::env::var(WINDOWS_SHELL_ENV).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "0" | "false" | "cmd" | "off")
+    {
+        return None;
+    }
+
+    if matches!(raw.to_ascii_lowercase().as_str(), "auto" | "1" | "true" | "bash" | "git-bash") {
+        return GIT_BASH_CANDIDATES
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.is_file());
+    }
+
+    let explicit = std::path::PathBuf::from(raw);
+    // An explicit path that does not exist is a configuration error. Falling
+    // back to cmd.exe would run the command anyway, under a shell the caller
+    // did not ask for and whose syntax differs -- a silent wrong answer. Warn
+    // loudly and let the caller see cmd.exe behaviour rather than guess.
+    if !explicit.is_file() {
+        eprintln!(
+            "[jcode] {WINDOWS_SHELL_ENV} points at {} which does not exist; using cmd.exe",
+            explicit.display()
+        );
+        return None;
+    }
+    Some(explicit)
+}
 
 #[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
@@ -531,6 +605,18 @@ impl Drop for ProcessGroupKillGuard {
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
+        // Opt-in POSIX shell. Checked per call rather than cached so the
+        // variable can be set for a single session without a restart.
+        if let Some(shell) = windows_posix_shell() {
+            let mut cmd = TokioCommand::new(shell);
+            // `arg` (not `raw_arg`): bash.exe uses the standard argument
+            // decoding rules, so the script reaches it as ONE argv entry with
+            // its quoting intact. This is the whole point -- cmd.exe is never
+            // in the path, so it cannot reinterpret `|`, `&&`, `2>` or quotes.
+            cmd.arg("-c").arg(cmd_str);
+            return cmd;
+        }
+
         let mut cmd = TokioCommand::new("cmd.exe");
         // cmd.exe does not use the standard C runtime argument-decoding rules.
         // Passing the command through `arg` makes Rust escape nested quotes for
@@ -675,6 +761,153 @@ mod utf8_truncation_tests {
     }
 }
 
+/// The opt-in POSIX shell on Windows.
+///
+/// These tests mutate a process-wide environment variable, so they are kept in
+/// one module and run sequentially under a mutex: a parallel test that read the
+/// variable mid-flight would see another test's value and fail intermittently,
+/// which is worse than no test.
+#[cfg(all(test, windows))]
+mod windows_posix_shell_tests {
+    use super::{build_shell_command, windows_posix_shell, GIT_BASH_CANDIDATES, WINDOWS_SHELL_ENV};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // SAFETY: Rust 2024 marks env mutation unsafe because another THREAD may be
+    // reading the environment concurrently. ENV_LOCK serialises these tests
+    // against each other, and the value is always restored before the guard is
+    // dropped, so no other test observes a modified environment.
+    fn set_env(value: Option<&str>) {
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(WINDOWS_SHELL_ENV, v),
+                None => std::env::remove_var(WINDOWS_SHELL_ENV),
+            }
+        }
+    }
+
+    fn with_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
+        set_env(value);
+        let out = f();
+        set_env(previous.as_deref());
+        out
+    }
+
+    fn installed_git_bash() -> Option<&'static str> {
+        GIT_BASH_CANDIDATES
+            .iter()
+            .copied()
+            .find(|p| std::path::Path::new(p).is_file())
+    }
+
+    #[test]
+    fn unset_keeps_cmd_exe() {
+        with_env(None, || {
+            assert!(
+                windows_posix_shell().is_none(),
+                "default must stay cmd.exe so no existing install changes behaviour"
+            );
+        });
+    }
+
+    #[test]
+    fn falsy_values_keep_cmd_exe() {
+        for v in ["", "  ", "0", "false", "cmd", "off", "OFF"] {
+            with_env(Some(v), || {
+                assert!(windows_posix_shell().is_none(), "{v:?} should mean cmd.exe");
+            });
+        }
+    }
+
+    #[test]
+    fn a_missing_explicit_path_falls_back_rather_than_pretending() {
+        with_env(Some(r"C:\definitely\not\here\bash.exe"), || {
+            assert!(
+                windows_posix_shell().is_none(),
+                "a shell that does not exist must not be returned as usable"
+            );
+        });
+    }
+
+    #[test]
+    fn auto_finds_git_bash_when_installed() {
+        let Some(expected) = installed_git_bash() else {
+            return; // no git-bash on this machine; nothing to assert
+        };
+        for v in ["auto", "AUTO", "1", "true", "bash", "git-bash"] {
+            with_env(Some(v), || {
+                assert_eq!(
+                    windows_posix_shell().as_deref(),
+                    Some(std::path::Path::new(expected)),
+                    "{v:?} should resolve to the installed git-bash"
+                );
+            });
+        }
+    }
+
+    /// The four cmd.exe behaviours that made this worth doing. Each EXITS 0
+    /// under cmd.exe while producing the wrong output, so asserting the exit
+    /// code alone would pass either way -- assert the OUTPUT.
+    #[tokio::test]
+    async fn posix_shell_fixes_the_forms_cmd_silently_mangles() {
+        let Some(shell) = installed_git_bash() else {
+            return;
+        };
+
+        for (command, expected, what) in [
+            ("echo one | head -1", "one", "a pipe"),
+            ("echo a && echo b", "a", "a chain"),
+            ("echo 'quoted'", "quoted", "single quotes (cmd keeps them)"),
+            ("echo one ; echo two", "two", "a `;` separator (cmd prints it literally)"),
+        ] {
+            let output = with_env(Some(shell), || build_shell_command(command))
+                .output()
+                .await
+                .expect("run posix shell command");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{what}: command failed: {command:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains(expected),
+                "{what}: expected {expected:?} in stdout, got {stdout:?}"
+            );
+            assert!(
+                !stdout.contains('\''),
+                "{what}: quote characters leaked into output: {stdout:?}"
+            );
+        }
+    }
+
+    /// The description is the agent's instruction for how to quote; if it
+    /// disagrees with the shell actually in use, the agent writes the wrong
+    /// syntax for the shell it has.
+    #[test]
+    fn description_tracks_the_selected_shell() {
+        use crate::tool::bash::BashTool;
+        use crate::tool::Tool;
+        let tool = BashTool::new();
+        with_env(None, || {
+            assert!(
+                tool.description().contains("cmd.exe"),
+                "default description must still say cmd.exe"
+            );
+        });
+        if installed_git_bash().is_some() {
+            with_env(Some("auto"), || {
+                let d = tool.description();
+                assert!(d.contains("Bash syntax"), "unexpected description: {d}");
+                assert!(!d.contains("Use cmd.exe syntax"), "stale cmd.exe guidance: {d}");
+            });
+        }
+    }
+}
+
 pub struct BashTool;
 
 impl BashTool {
@@ -719,9 +952,19 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        if cfg!(windows) {
-            WINDOWS_SHELL_TOOL_DESCRIPTION
-        } else {
+        #[cfg(windows)]
+        {
+            // The description IS the agent's instruction for how to quote. If
+            // it says "use cmd.exe syntax" while a POSIX shell is running, the
+            // agent writes the wrong syntax for the shell it actually has --
+            // so this must track the selection, not the platform.
+            if windows_posix_shell().is_some() {
+                return WINDOWS_POSIX_SHELL_TOOL_DESCRIPTION;
+            }
+            return WINDOWS_SHELL_TOOL_DESCRIPTION;
+        }
+        #[cfg(not(windows))]
+        {
             BASH_TOOL_DESCRIPTION
         }
     }
