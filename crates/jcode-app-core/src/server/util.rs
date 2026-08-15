@@ -1000,6 +1000,24 @@ mod newest_reload_candidate_integration_tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    /// Set a file's mtime, from a handle that is allowed to do it.
+    ///
+    /// `File::open` returns a READ-ONLY handle. Unix does not care, but Windows
+    /// requires FILE_WRITE_ATTRIBUTES and fails with "Access is denied"
+    /// (os error 5), so every one of these tests failed on Windows in setup --
+    /// before reaching a single assertion -- while passing on Linux and CI.
+    /// Measured 2026-08-15 in a clean temp dir with no jcode running: a
+    /// read-only handle FAILED and a write handle succeeded, so this is
+    /// deterministic rather than a locked-file or stale-process problem.
+    fn set_mtime(path: &std::path::Path, mtime: SystemTime) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for mtime")
+            .set_modified(mtime)
+            .expect("set mtime");
+    }
+
     fn install_versioned_binary(version: &str, mtime: SystemTime) -> std::path::PathBuf {
         // A real, distinct file per version so mtimes are independently settable
         // (install hard-links the source, which would share an inode/mtime).
@@ -1010,18 +1028,47 @@ mod newest_reload_candidate_integration_tests {
         std::fs::create_dir_all(&dir).expect("create version dir");
         let path = dir.join(build::binary_name());
         std::fs::write(&path, format!("binary for {version}")).expect("write binary");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .expect("open binary")
-            .set_modified(mtime)
-            .expect("set mtime");
+        set_mtime(&path, mtime);
         path
     }
 
+    /// The version of whatever binary the reload logic actually picked.
+    ///
+    /// Identify it by CONTENT, not by path. On unix a channel entry is a
+    /// symlink into `versions/<version>/`, so the parent directory name is the
+    /// version; on Windows `atomic_symlink_swap` COPIES instead (a loaded exe
+    /// cannot be replaced in place), so the channel holds a real file whose
+    /// parent is the CHANNEL name and the version is unrecoverable from the
+    /// path -- measured 2026-08-15: a copy canonicalizes to parent
+    /// "shared-server" where the test wanted "0.15.0".
+    ///
+    /// Reading the `<channel>-version` MARKER file would also "work" and would
+    /// be wrong: the tests write those markers themselves, so the assertion
+    /// would compare a test input against itself.
+    ///
+    /// `install_versioned_binary` writes "binary for <version>", which travels
+    /// with the BYTES through both a symlink and a copy, so the assertion keeps
+    /// testing real channel resolution on both platforms.
+    ///
+    /// Verified by mutation (2026-08-15): forcing every session to take the
+    /// pinned shared-server binary turns
+    /// `selfdev_daemon_reloads_into_fresh_release_after_update` RED, reporting
+    /// the stale pin "3f160da1-dirty-e756d52efca9" where the fresh release
+    /// "0.15.0" was required. Note a weaker mutation is NOT detected, and that
+    /// is a property of the code under test rather than of this helper:
+    /// `newest_reload_candidate` queries BOTH session flavors and picks by
+    /// mtime, so deleting one flavor's fall-through still lets the other
+    /// supply the same answer.
     fn candidate_version_for(is_selfdev: bool) -> Option<String> {
         let (path, _label) = newest_reload_candidate(is_selfdev)?;
         let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+
+        if let Ok(contents) = std::fs::read_to_string(&canonical)
+            && let Some(version) = contents.strip_prefix("binary for ")
+        {
+            return Some(version.trim().to_string());
+        }
+
         canonical
             .parent()
             .and_then(Path::file_name)
@@ -1185,6 +1232,10 @@ mod newest_reload_candidate_integration_tests {
     /// script plus the real `jcode-linux-x86_64.bin` payload, with independently
     /// settable mtimes. This is exactly what `/update`'s tar.gz install path
     /// produces on disk.
+    /// Only the unix wrapper/payload test uses this; see the `#[cfg(unix)]` on
+    /// `freshly_updated_release_daemon_reports_no_phantom_update` for why that
+    /// layout cannot occur on Windows.
+    #[cfg(unix)]
     fn install_release_style_binary(
         version: &str,
         wrapper_mtime: SystemTime,
@@ -1197,24 +1248,14 @@ mod newest_reload_candidate_integration_tests {
         std::fs::create_dir_all(&dir).expect("create version dir");
         let payload = dir.join("jcode-linux-x86_64.bin");
         std::fs::write(&payload, format!("payload for {version}")).expect("write payload");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&payload)
-            .expect("open payload")
-            .set_modified(payload_mtime)
-            .expect("set payload mtime");
+        set_mtime(&payload, payload_mtime);
         let wrapper = dir.join(build::binary_name());
         std::fs::write(
             &wrapper,
             "#!/usr/bin/env sh\nexec ./jcode-linux-x86_64.bin \"$@\"\n",
         )
         .expect("write wrapper");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&wrapper)
-            .expect("open wrapper")
-            .set_modified(wrapper_mtime)
-            .expect("set wrapper mtime");
+        set_mtime(&wrapper, wrapper_mtime);
         (wrapper, payload)
     }
 
@@ -1226,6 +1267,18 @@ mod newest_reload_candidate_integration_tests {
     /// updated daemon report "newer binary available" against ITS OWN install
     /// forever -> the client force-reloaded the server in a loop and the
     /// session never attached.
+    ///
+    /// Unix-only, and not for convenience: the scenario cannot EXIST on
+    /// Windows. It needs a channel entry that resolves back into
+    /// `versions/<v>/` so the `#!` wrapper can find its sibling `.bin` payload.
+    /// `atomic_symlink_swap` copies on Windows (a loaded exe cannot be replaced
+    /// in place), and the copy takes only the wrapper -- measured 2026-08-15:
+    /// the payload is absent from the channel dir, so the wrapper resolves to
+    /// itself and no wrapper-vs-payload comparison happens at all. Windows also
+    /// ships a single self-contained .exe with no wrapper, so the loop this
+    /// guards against is unreachable there. Running it on Windows would assert
+    /// against a layout the platform never produces.
+    #[cfg(unix)]
     #[test]
     fn freshly_updated_release_daemon_reports_no_phantom_update() {
         let _guard = crate::storage::lock_test_env();
