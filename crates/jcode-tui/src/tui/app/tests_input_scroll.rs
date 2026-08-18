@@ -289,6 +289,45 @@ fn test_remote_shift_enter_inserts_newline() {
     assert!(app.queued_messages().is_empty());
 }
 
+/// The word-delete attribution line must actually reach the log sink.
+///
+/// Guards the diagnostic added for the 2026-08-18 "letters get back-deleted"
+/// report. "Zero word-delete lines in the log" is only evidence of clean
+/// typing if the line demonstrably fires when a word-delete happens; without
+/// this test, deleting the logging call would make real deletions invisible
+/// again while every behavior test stayed green. Drives the same
+/// handle_remote_key path a real Ctrl+Backspace takes, then reads the real
+/// log file the running client writes to.
+#[test]
+fn test_word_delete_writes_attribution_log_line() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    crate::logging::init();
+    let log_path = crate::storage::logs_dir()
+        .expect("logs dir")
+        .join(format!("jcode-{}.log", chrono::Local::now().format("%Y-%m-%d")));
+    let before = std::fs::read_to_string(&log_path)
+        .map(|content| content.matches("input word-delete: removed").count())
+        .unwrap_or(0);
+
+    rt.block_on(app.handle_remote_key(KeyCode::Backspace, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert_eq!(app.input(), "hello world ", "the word-delete itself must work");
+
+    let after = std::fs::read_to_string(&log_path)
+        .map(|content| content.matches("input word-delete: removed").count())
+        .unwrap_or(0);
+    assert!(
+        after > before,
+        "delete_input_word_back ran but wrote no attribution line to {}          (before={before}, after={after}); the back-deletion diagnostic is dead",
+        log_path.display()
+    );
+}
+
 #[test]
 fn test_remote_ctrl_backspace_csi_u_char_fallback_deletes_word() {
     let rt = tokio::runtime::Runtime::new().unwrap();
