@@ -245,7 +245,11 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .get(session_id)
             .and_then(|member| member.swarm_id.clone())
             .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+        // Session-scoped, not working-dir-scoped, since d36043978: deriving
+        // the id from the directory made every unrelated session in one repo
+        // share a swarm plan. This assertion kept the old expectation and
+        // failed against the deliberate new behavior.
+        Some("session:session_test_swarm_toggle")
     );
     assert_eq!(
         swarm_members
