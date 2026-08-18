@@ -63,15 +63,26 @@ pub trait Transport: Send {
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)>;
 }
 
-/// A Unix socket transport, the default.
-pub struct UnixTransport(std::os::unix::net::UnixStream);
+/// The default local IPC transport.
+///
+/// A Unix socket on Unix and a named pipe on Windows, via `jcode-transport`,
+/// which exists precisely so foundation-free crates like this one do not
+/// hand-roll platform IPC. This was `std::os::unix::net::UnixStream`
+/// directly, which could not even COMPILE on Windows -- and because
+/// `cargo test --workspace` therefore failed before running a single test,
+/// it silently blocked `selfdev test` on Windows machines (found 2026-08-18
+/// while investigating why self-dev was unhealthy there).
+///
+/// The name stays `UnixTransport` because it is re-exported from `lib.rs`
+/// as public API; renaming it is a breaking change with no behavioral gain.
+pub struct UnixTransport(jcode_transport::SyncStream);
 
 impl UnixTransport {
     pub fn connect(path: &std::path::Path) -> Result<Self> {
         // A bare `No such file or directory` names the syscall and hides the
         // cause: the bridge is not running. Connecting is the first thing
         // anyone does with this SDK, so say what to do about it.
-        let stream = std::os::unix::net::UnixStream::connect(path).map_err(|cause| {
+        let stream = jcode_transport::SyncStream::connect(path).map_err(|cause| {
             Error::new(
                 ErrorKind::ConnectFailed,
                 match cause.kind() {

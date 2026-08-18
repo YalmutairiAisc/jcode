@@ -2081,6 +2081,24 @@ pub(super) fn delete_input_word_back(app: &mut App) {
     let start = app.find_word_boundary_back();
     if start < app.cursor_pos {
         app.remember_input_undo_state();
+        // Attributable destruction (2026-08-18). The founder reported letters
+        // being "back-deleted" while typing, and nothing in the logs could say
+        // which path ate them: FIVE dispatch arms funnel here (Ctrl+W, legacy
+        // Ctrl+H backspace, Ctrl/Alt/Super+Backspace), and a terminal that
+        // mis-tags a plain keypress with a modifier bit (issue #896 is exactly
+        // that, for `i` -> Ctrl+Alt+I) turns ordinary typing into word-deletes
+        // with no trace. One log line per word-delete makes the next report a
+        // one-grep diagnosis instead of a code reading exercise. Deletes are
+        // rare (human-speed) so this cannot flood the log the way logging
+        // insertions would.
+        let removed = app.input[start..app.cursor_pos].chars().count();
+        crate::logging::info(&format!(
+            "input word-delete: removed {} chars at cursor {} (input had {} chars) via {:?}",
+            removed,
+            app.cursor_pos,
+            app.input.chars().count(),
+            crate::tui::ui::frame_input_attribution_snapshot().event,
+        ));
     }
     app.input.drain(start..app.cursor_pos);
     app.cursor_pos = start;

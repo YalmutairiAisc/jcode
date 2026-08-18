@@ -5,6 +5,27 @@ use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
+/// A provider-fleet overload: transient by definition, safe to auto-retry.
+///
+/// Deliberately NARROW. The broad "retryable" classifier in the provider
+/// runtime also matches 429s and rate limits, which have their own
+/// Retry-After-driven path in this handler, and generic 5xx strings, which
+/// can be a proxy mangling a genuinely broken request. An overload message
+/// is the one shape where resending the identical request is known-correct:
+/// the fleet was busy, nothing about the request was judged at all.
+///
+/// Matches the wire strings observed 2026-08-18 when Anthropic's fleet
+/// brownout killed message ids 22 and 24 of this session:
+///   {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+///   529 Overloaded (the HTTP status form -- which also contains the word)
+///
+/// A bare "529" is NOT matched on its own: three digits appear in token
+/// counts, request ids and byte sizes, and a false positive here would
+/// auto-resend a request that failed for a real reason.
+fn is_provider_overload_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("overloaded")
+}
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -1386,6 +1407,31 @@ pub(in crate::tui::app) fn handle_server_event(
                     failed_fallback_payload.clone(),
                 );
                 return false;
+            }
+            // Provider-overload storms (Anthropic 529 "Overloaded", 5xx bursts)
+            // outlive the server's 3 fast in-provider retries (~1s/2s/4s), and a
+            // MANUAL prompt carries auto_retry=false, so the turn used to die
+            // right here: the error joined the transcript, the prompt was put
+            // back in the box, and nothing moved again until a human noticed.
+            // Measured on 2026-08-18 (message ids 22 and 24 in this very
+            // session): the founder read that silence as "jcode gets stuck a
+            // lot". An overload is the OPPOSITE of a deterministic failure --
+            // the identical request succeeds once the fleet drains -- so it is
+            // exactly what the client-side scheduled-retry path exists for.
+            // Promote the pending turn to auto_retry and let the ordinary
+            // bounded ladder (3 attempts, 2s/4s/6s, visible "retrying" banner)
+            // take it from there; every deterministic-failure class was already
+            // filtered out above (fatal endpoint, non-retryable, credential
+            // breaker), so this cannot loop on a request that can never work.
+            if !is_failover_prompt
+                && is_provider_overload_error(&message)
+                && let Some(pending) = app.rate_limit_pending_message.as_mut()
+                && !pending.auto_retry
+            {
+                pending.auto_retry = true;
+                crate::logging::info(
+                    "Promoting manual turn to auto-retry: provider overload is transient",
+                );
             }
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
             {

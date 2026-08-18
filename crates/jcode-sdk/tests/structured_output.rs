@@ -1,3 +1,15 @@
+
+// Unix-only: this file scripts a MOCK HARNESS over a real Unix socket pair
+// (`UnixListener::bind` + `UnixStream`), which does not exist on Windows. The
+// SDK itself is cross-platform (its transport is a named pipe on Windows via
+// `jcode-transport`); what is Unix-bound here is only the test double. Before
+// this gate the file failed to COMPILE on Windows, which broke
+// `cargo test --workspace` before a single test ran -- and with it
+// `selfdev test` on Windows machines (found 2026-08-18). A named-pipe port of
+// the mock server is possible but earns its keep only when Windows-specific
+// SDK behavior needs pinning; the protocol logic under test is identical.
+#![cfg(unix)]
+
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, read_frame, write_frame,
 };

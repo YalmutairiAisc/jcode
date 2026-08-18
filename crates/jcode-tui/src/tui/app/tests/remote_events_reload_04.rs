@@ -2436,3 +2436,99 @@ fn test_credential_failure_breaker_resets_on_turn_success() {
         "a successful turn must reset the credential-failure streak"
     );
 }
+
+/// A provider overload must not kill a manually typed turn.
+///
+/// Reproduces the 2026-08-18 failure verbatim: Anthropic's fleet answered
+/// `overloaded_error` past the provider runtime's 3 fast retries, the error
+/// reached the client on a MANUAL prompt (auto_retry=false, because only
+/// system continuations opted in), no client retry was scheduled, and the
+/// session went silent until a human noticed. The founder's words for the
+/// symptom were "you get stuck a lot".
+///
+/// The fix promotes the pending manual turn to auto_retry when -- and only
+/// when -- the error is an overload, then rides the existing bounded ladder.
+#[test]
+fn test_provider_overload_promotes_manual_turn_to_auto_retry() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "investigate the input bug".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false, // a manual, user-typed prompt
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(22);
+
+    // The exact wire string from the incident log (request_id elided).
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 22,
+            message: r#"Retryable stream error: {"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("an overloaded manual turn must stay pending, not die in the transcript");
+    assert!(
+        pending.auto_retry,
+        "overload must promote the manual turn to auto-retry"
+    );
+    assert_eq!(pending.retry_attempts, 1, "the retry ladder must have begun");
+    assert!(pending.retry_at.is_some(), "a retry time must be scheduled");
+    assert!(
+        app.rate_limit_reset.is_some(),
+        "the tick loop resumes from rate_limit_reset; without it nothing ever fires"
+    );
+}
+
+/// The promotion is overload-ONLY: a deterministic failure on a manual turn
+/// must still fail fast rather than resend a request that can never work.
+#[test]
+fn test_non_overload_error_still_fails_a_manual_turn_fast() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "a prompt that hits a real bug".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(23);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 23,
+            message: "provider failed hard".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(
+        app.rate_limit_pending_message.is_none(),
+        "a non-overload error on a manual turn must not be silently resent"
+    );
+}
