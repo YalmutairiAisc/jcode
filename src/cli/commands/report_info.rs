@@ -187,8 +187,19 @@ fn build_auth_status_report() -> AuthStatusReport {
         })
         .collect::<Vec<_>>();
 
+    // Derive the headline from the rows this report actually lists, not from
+    // `has_any_available()`. That helper checks a fixed set of eleven native
+    // credential slots and knows nothing about OpenAI-compatible profiles, so
+    // a user whose ONLY working login was Cerebras (or any other compat
+    // gateway) got a report whose rows said "available" while its summary
+    // said no -- and the lifecycle test that logs into Cerebras and asserts
+    // `any_available` failed against a correct login. The per-row states come
+    // from `assessment_for_provider`, which does understand compat profiles;
+    // a summary that can contradict its own rows is not a summary.
     AuthStatusReport {
-        any_available: status.has_any_available(),
+        any_available: reports
+            .iter()
+            .any(|provider| provider.status == "available"),
         providers: reports,
     }
 }

@@ -243,9 +243,22 @@ fn isolated_launcher_env() -> (
 ) {
     let lock = lock_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let env = EnvVarGuard::capture(&["JCODE_INSTALL_DIR", "JCODE_HOME", "HOME", "USERPROFILE"]);
+    let env = EnvVarGuard::capture(&[
+        "JCODE_INSTALL_DIR",
+        "JCODE_HOME",
+        "HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+    ]);
     crate::env::set_var("HOME", temp.path());
     crate::env::set_var("USERPROFILE", temp.path());
+    // On Windows `launcher_dir()` consults LOCALAPPDATA before the home
+    // fallback, so leaving the machine's real value in place lets it leak
+    // through the sandbox: this test failed on every Windows box, comparing
+    // the REAL AppData jcode/bin against the tempdir it expected. Point it
+    // into the tempdir so the sandbox is complete on every platform
+    // (harmless on Unix, where nothing reads it).
+    crate::env::set_var("LOCALAPPDATA", temp.path().join("AppData").join("Local"));
     crate::env::remove_var("JCODE_INSTALL_DIR");
     crate::env::remove_var("JCODE_HOME");
     (lock, env, temp)
@@ -296,24 +309,45 @@ fn test_selfdev_build_command_prefers_repo_wrapper_when_present() {
         .expect("write wrapper");
 
     let build = build::selfdev_build_command(temp.path());
-    assert_eq!(build.program, "bash");
-    assert_eq!(build.args.first().map(String::as_str), Some("-lc"));
-    let command = build.args.get(1).expect("shell command");
-    assert!(command.contains("dev_cargo.sh' build --profile selfdev -p jcode --bin jcode"));
-    assert!(!command.contains("jcode-desktop"));
-    assert!(build.display.contains("-p jcode --bin jcode"));
-    assert!(!build.display.contains("jcode-desktop"));
+    // The wrapper is only used where `bash` is unambiguous. On Windows,
+    // `bash` can resolve to the WSL launcher (a Linux VM without the Windows
+    // toolchain -- jcode commit 3d9e6c937 is the incident), so the build
+    // DELIBERATELY bypasses the wrapper and invokes cargo directly. These
+    // assertions used to hardcode the Unix shape, which made the test fail
+    // on every Windows machine while the behavior it complained about was
+    // correct.
+    if cfg!(windows) {
+        assert_eq!(build.program, "cargo");
+        assert!(build.display.contains("-p jcode --bin jcode"));
+        assert!(!build.display.contains("jcode-desktop"));
+    } else {
+        assert_eq!(build.program, "bash");
+        assert_eq!(build.args.first().map(String::as_str), Some("-lc"));
+        let command = build.args.get(1).expect("shell command");
+        assert!(command.contains("dev_cargo.sh' build --profile selfdev -p jcode --bin jcode"));
+        assert!(!command.contains("jcode-desktop"));
+        assert!(build.display.contains("-p jcode --bin jcode"));
+        assert!(!build.display.contains("jcode-desktop"));
+    }
 }
 
 #[test]
 fn test_selfdev_build_command_falls_back_to_cargo_when_wrapper_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let build = build::selfdev_build_command(temp.path());
-    assert_eq!(build.program, "bash");
-    assert_eq!(build.args.first().map(String::as_str), Some("-lc"));
-    let command = build.args.get(1).expect("shell command");
-    assert!(command.contains("cargo build --profile selfdev -p jcode --bin jcode"));
-    assert!(!command.contains("jcode-desktop"));
+    if cfg!(windows) {
+        // Windows never routes through bash (see the wrapper test above), so
+        // "fallback" and the normal path are the same direct cargo invocation.
+        assert_eq!(build.program, "cargo");
+        assert!(build.display.contains("-p jcode --bin jcode"));
+        assert!(!build.display.contains("jcode-desktop"));
+    } else {
+        assert_eq!(build.program, "bash");
+        assert_eq!(build.args.first().map(String::as_str), Some("-lc"));
+        let command = build.args.get(1).expect("shell command");
+        assert!(command.contains("cargo build --profile selfdev -p jcode --bin jcode"));
+        assert!(!command.contains("jcode-desktop"));
+    }
 }
 
 #[test]
