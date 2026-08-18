@@ -194,7 +194,14 @@ pub(crate) fn reserve_tcp_port() -> Result<u16> {
 
 pub(crate) async fn wait_for_socket(path: &std::path::Path) -> Result<()> {
     let start = Instant::now();
-    while !path.exists() {
+    // `path.exists()` is only true for the Unix-socket transport. On Windows
+    // the "socket" is a named pipe (\.\pipe\...): nothing appears at the
+    // filesystem path, so this loop span its full 10s and failed five e2e
+    // suites with "Server socket did not appear" on every Windows machine.
+    // `jcode-transport::is_socket_path` answers the question this loop is
+    // actually asking -- "is something listening at this endpoint?" -- for
+    // whichever mechanism the platform uses.
+    while !jcode_transport::is_socket_path(path) {
         if start.elapsed() > Duration::from_secs(10) {
             anyhow::bail!("Server socket did not appear");
         }
