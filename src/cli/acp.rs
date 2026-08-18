@@ -2084,8 +2084,21 @@ mod tests {
     fn cwd_must_be_absolute() {
         let params = json!({"cwd": "relative"});
         assert!(cwd_from_params(&params).is_err());
-        let params = json!({"cwd": "/tmp"});
-        assert_eq!(cwd_from_params(&params).unwrap(), Path::new("/tmp"));
+        // "Absolute" is platform-defined: on Windows a drive-less "/tmp" is
+        // NOT absolute (no drive component), and the production check is
+        // right to reject it. The old fixture hardcoded "/tmp" and failed on
+        // every Windows machine against correct behavior.
+        let absolute = if cfg!(windows) { r"C:\tmp" } else { "/tmp" };
+        let params = json!({ "cwd": absolute });
+        assert_eq!(cwd_from_params(&params).unwrap(), Path::new(absolute));
+        #[cfg(windows)]
+        {
+            let params = json!({"cwd": "/tmp"});
+            assert!(
+                cwd_from_params(&params).is_err(),
+                "a drive-less path is not absolute on Windows and must be rejected"
+            );
+        }
     }
 
     #[test]

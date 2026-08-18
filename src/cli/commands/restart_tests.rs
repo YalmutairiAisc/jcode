@@ -7,6 +7,8 @@ use std::ffi::OsString;
 
 struct TestEnvGuard {
     prev_home: Option<OsString>,
+    prev_runtime_dir: Option<OsString>,
+    prev_socket: Option<OsString>,
     _temp_home: tempfile::TempDir,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -19,8 +21,23 @@ impl TestEnvGuard {
             .tempdir()?;
         let prev_home = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_HOME", temp_home.path());
+        // JCODE_HOME does NOT cover the server socket: that resolves through
+        // `runtime_dir()` (JCODE_RUNTIME_DIR / XDG_RUNTIME_DIR / temp), so on
+        // any machine with a LIVE daemon these tests connected to the real
+        // server's debug socket and failed with "Debug control is disabled" --
+        // a production answer to a test question. Found 2026-08-18 on the
+        // machine whose daemon this very session runs on; green on CI only
+        // because CI has no server running. Point the runtime dir into the
+        // sandbox too so `connect_debug` deterministically finds nothing and
+        // the code under test takes its local-snapshot path.
+        let prev_runtime_dir = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp_home.path().join("runtime"));
+        let prev_socket = std::env::var_os("JCODE_SOCKET");
+        crate::env::remove_var("JCODE_SOCKET");
         Ok(Self {
             prev_home,
+            prev_runtime_dir,
+            prev_socket,
             _temp_home: temp_home,
             _lock: lock,
         })
@@ -33,6 +50,16 @@ impl Drop for TestEnvGuard {
             crate::env::set_var("JCODE_HOME", prev_home);
         } else {
             crate::env::remove_var("JCODE_HOME");
+        }
+        if let Some(prev_runtime_dir) = &self.prev_runtime_dir {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime_dir);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+        if let Some(prev_socket) = &self.prev_socket {
+            crate::env::set_var("JCODE_SOCKET", prev_socket);
+        } else {
+            crate::env::remove_var("JCODE_SOCKET");
         }
     }
 }

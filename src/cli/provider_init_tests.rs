@@ -286,7 +286,16 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    // Assert through the constant, not a copied literal. The name has moved
+    // twice (d1aecc694: "Jcode Subscription" -> "Jcode Hosted Models";
+    // 35e9e4bfc: back again) and this literal was left behind on the second
+    // move, failing against correct behavior -- on upstream master too, not
+    // just here. What this test actually guards is that the Jcode choice
+    // returns the subscription provider, whatever it is currently branded.
+    assert_eq!(
+        provider.name(),
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),

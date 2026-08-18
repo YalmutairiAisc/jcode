@@ -307,8 +307,18 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            // The continuation deliberately hides evaluator language: its doc
+            // reads "without exposing evaluator language, scores, thresholds,
+            // or the internal reason". The old assertion here demanded the
+            // LEGACY wording ("completion confidence"), so it failed against
+            // the correct rewritten message -- on upstream master too. What
+            // the message must actually do is NAME the todos needing another
+            // look, and keep the evaluator's vocabulary out.
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("todo a"));
+            assert!(message.contains("todo b"));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
+            assert!(!message.to_ascii_lowercase().contains("confidence"));
         }
         _ => panic!("expected confidence-summary follow-up"),
     }
@@ -1144,18 +1154,27 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         "NO_PROXY",
         "no_proxy",
     ]);
-    // 0.0.0.0 is accepted as an insecure HTTP test host but is not treated as
-    // localhost by resolve_openai_compatible_profile, so this exercises the
-    // hosted/API-key code path while still serving the response locally.
+    // The host must satisfy three constraints at once: NOT the literal
+    // "localhost"/"127.0.0.1"/"::1" (so resolve_openai_compatible_profile
+    // takes the hosted/API-key path), allowed as an insecure HTTP host, and
+    // actually CONNECTABLE. "0.0.0.0" does all three on Unix, where
+    // connecting to the unspecified address is treated as loopback -- but on
+    // Windows it fails with WSAEADDRNOTAVAIL (10049): you cannot connect TO
+    // 0.0.0.0 there, so this test failed on every Windows machine. Windows
+    // routes the whole 127/8 block to loopback, so 127.0.0.2 meets all three
+    // constraints there ("127.0.0.1" is string-compared, .2 is not it, and
+    // is_loopback() allows it as insecure). Stock macOS has only 127.0.0.1
+    // aliased, so 0.0.0.0 stays the pick everywhere else.
+    let insecure_nonlocal_host = if cfg!(windows) { "127.0.0.2" } else { "0.0.0.0" };
     let api_base = spawn_single_response_http_server_on_host(
-        "0.0.0.0",
+        insecure_nonlocal_host,
         200,
         r#"{"data":[{"id":"hosted-compatible-model"}]}"#,
     );
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::set_var("OPENAI_COMPAT_API_KEY", "test-key");
-    crate::env::set_var("NO_PROXY", "0.0.0.0,127.0.0.1,localhost");
-    crate::env::set_var("no_proxy", "0.0.0.0,127.0.0.1,localhost");
+    crate::env::set_var("NO_PROXY", "0.0.0.0,127.0.0.1,127.0.0.2,localhost");
+    crate::env::set_var("no_proxy", "0.0.0.0,127.0.0.1,127.0.0.2,localhost");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
     crate::provider_catalog::apply_openai_compatible_profile_env(None);

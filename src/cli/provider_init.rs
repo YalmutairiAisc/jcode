@@ -113,6 +113,11 @@ pub enum ProviderChoice {
     Chutes,
     #[value(alias = "cerebrascode", alias = "cerberascode")]
     Cerebras,
+    // Added 2026-08-18: upstream a2622db13 put OrcaRouter in the login catalog
+    // without a CLI choice, which two registry-consistency tests catch. Every
+    // non-AutoImport catalog provider must appear here.
+    #[value(alias = "orca-router")]
+    Orcarouter,
     #[value(
         alias = "bailian",
         alias = "aliyun-bailian",
@@ -183,6 +188,7 @@ impl ProviderChoice {
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
             Self::Cerebras => "cerebras",
+            Self::Orcarouter => "orcarouter",
             Self::AlibabaCodingPlan => "alibaba-coding-plan",
             Self::OpenaiCompatible => "openai-compatible",
             Self::Cursor => "cursor",
@@ -365,6 +371,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Cerebras,
         crate::provider_catalog::CEREBRAS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Orcarouter,
+        crate::provider_catalog::ORCAROUTER_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::AlibabaCodingPlan,
@@ -1582,6 +1592,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
         | ProviderChoice::Cerebras
+        | ProviderChoice::Orcarouter
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
         | ProviderChoice::OpenaiCompatible => {
