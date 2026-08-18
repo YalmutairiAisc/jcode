@@ -3412,6 +3412,7 @@ dependencies = [
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
  "jcode-selfdev-types",
+ "jcode-transport",
  "jcode-tui",
  "jcode-tui-session-picker",
  "jcode-tui-style",
