@@ -67,6 +67,18 @@ pub trait Transport: Send {
 /// A Unix-domain socket transport, the default.
 type PlatformUnixStream = jcode_transport::SyncStream;
 
+/// The default local IPC transport.
+///
+/// A Unix socket on Unix and a named pipe on Windows, via `jcode-transport`,
+/// which exists precisely so foundation-free crates like this one do not
+/// hand-roll platform IPC. This was `std::os::unix::net::UnixStream`
+/// directly, which could not even COMPILE on Windows -- and because
+/// `cargo test --workspace` therefore failed before running a single test,
+/// it silently blocked `selfdev test` on Windows machines (found 2026-08-18
+/// while investigating why self-dev was unhealthy there).
+///
+/// The name stays `UnixTransport` because it is re-exported from `lib.rs`
+/// as public API; renaming it is a breaking change with no behavioral gain.
 pub struct UnixTransport(PlatformUnixStream);
 
 impl UnixTransport {

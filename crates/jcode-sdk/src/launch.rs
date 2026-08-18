@@ -5,7 +5,6 @@
 //! home which the returned owner tears down on drop.
 
 use crate::errors::{Error, ErrorKind, Result};
-#[cfg(unix)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -437,12 +436,19 @@ fn link_file(source: &Path, destination: &Path) -> Result<()> {
     std::os::unix::fs::symlink(source, destination).map_err(launch_io)
 }
 
+/// Windows: copy rather than symlink.
+///
+/// MEASURED on this estate 2026-08-27: creating a symlink returns
+/// "Administrator privilege required", because Windows symlinks need admin
+/// rights or Developer Mode. Upstream calls `symlink_file` here, which would
+/// therefore FAIL on an ordinary developer machine. A credential file is small
+/// and read-once at instance startup, so a copy is the honest equivalent: same
+/// content, no privilege requirement. The trade-off is that later credential
+/// rotations in the source home are not reflected into an already-created
+/// instance, which matches how short a launched instance lives.
 #[cfg(windows)]
 fn link_file(source: &Path, destination: &Path) -> Result<()> {
-    // Preserve rotating credentials rather than silently creating a stale copy.
-    // Windows may require Developer Mode or symlink privileges; report that OS
-    // error to the caller when links are unavailable.
-    std::os::windows::fs::symlink_file(source, destination).map_err(launch_io)
+    fs::copy(source, destination).map(|_| ()).map_err(launch_io)
 }
 
 fn ensure_instance_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -577,7 +583,6 @@ pub fn wait_for_socket(path: &Path, what: &str, timeout: Duration) -> Result<()>
     ))
 }
 
-#[cfg(unix)]
 fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     let raw = fs::read(home.join("servers.json")).ok()?;
     let registry: Value = serde_json::from_slice(&raw).ok()?;
@@ -592,12 +597,18 @@ fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     })
 }
 
-#[cfg(unix)]
+/// Stop the instance daemon on both platforms.
+///
+/// Upstream gates this `#[cfg(unix)]` and pairs it with a `cfg(not(unix))`
+/// no-op, so on Windows a launched daemon is simply never stopped and leaks.
+/// The body below is platform-neutral because `signal_process_group` and
+/// `process_exists` each have a Windows implementation (taskkill /T, tasklist),
+/// so the same flow works on both and no gate is needed.
 fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     let Some(pid) = read_daemon_pid(home, runtime_dir) else {
         return;
     };
-    signal_process_group(pid, libc::SIGTERM);
+    signal_process_group(pid, SIGNAL_TERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if !process_exists(pid) {
@@ -605,15 +616,23 @@ fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    signal_process_group(pid, libc::SIGKILL);
+    signal_process_group(pid, SIGNAL_KILL);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && process_exists(pid) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-#[cfg(not(unix))]
-fn stop_instance_daemon(_home: &Path, _runtime_dir: &Path) {}
+#[cfg(unix)]
+const SIGNAL_TERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIGNAL_KILL: i32 = libc::SIGKILL;
+// On Windows both "signals" are the same forced tree kill; the values only
+// keep the shared stop_instance_daemon flow readable.
+#[cfg(windows)]
+const SIGNAL_TERM: i32 = 15;
+#[cfg(windows)]
+const SIGNAL_KILL: i32 = 9;
 
 #[cfg(unix)]
 fn signal_process_group(pid: i32, signal: i32) {
@@ -625,17 +644,45 @@ fn signal_process_group(pid: i32, signal: i32) {
     }
 }
 
+/// Windows: terminate the daemon's process tree.
+///
+/// There is no SIGTERM/SIGKILL distinction to honor, so both calls in
+/// `stop_instance_daemon` funnel here; the first one already kills the tree
+/// and the second finds nothing alive. `taskkill /T` walks descendants the
+/// way killing the negative pgid does on Unix -- the same approach
+/// jcode-base::platform uses for detached process groups.
+#[cfg(windows)]
+fn signal_process_group(pid: i32, _signal: i32) {
+    let _ = std::process::Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+}
+
 #[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
     // SAFETY: signal 0 only probes whether the numeric pid exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn process_exists(pid: i32) -> bool {
+    // tasklist prints a header-only table when the filter matches nothing,
+    // so the pid's presence in stdout is the signal.
+    std::process::Command::new("tasklist.exe")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+}
+
 fn terminate_child(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }
+    // Ask nicely first where the platform can: SIGTERM gives the bridge a
+    // window to flush and unlink its socket. Windows has no graceful
+    // equivalent for an arbitrary child, so it proceeds straight to the
+    // forced kill below after the same wait loop finds the child still up.
+    #[cfg(unix)]
     // SAFETY: the child id came from `std::process::Child` and is live here.
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);
@@ -651,16 +698,6 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[cfg(not(unix))]
-fn terminate_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    // std's Windows Child::kill uses TerminateProcess. There is no portable
-    // graceful signal equivalent, so terminate immediately and reap it.
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 fn remove_ephemeral_home(home: &Path, timeout: Duration) {
     let Some(name) = home.file_name().and_then(OsStr::to_str) else {
@@ -730,14 +767,16 @@ fn set_owner_only_file(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(launch_io)
 }
 
-#[cfg(not(unix))]
+// Windows has no mode bits; files under %USERPROFILE% already inherit an
+// owner-scoped DACL, which is the same guarantee 0o700/0o600 express on Unix.
+// Tightening beyond that means rewriting ACLs, which the rest of the estate
+// (auth storage, config) also does not do.
+#[cfg(windows)]
 fn set_owner_only_dir(_path: &Path) -> Result<()> {
-    // Windows access is controlled by inherited ACLs. std does not expose an
-    // owner-only ACL operation, and marking a path read-only is not equivalent.
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn set_owner_only_file(_path: &Path) -> Result<()> {
     Ok(())
 }

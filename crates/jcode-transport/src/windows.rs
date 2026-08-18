@@ -307,10 +307,27 @@ impl SyncStream {
         Ok(Self { handle: file })
     }
 
+    /// A second handle to the same pipe, mirroring `UnixStream::try_clone`.
+    ///
+    /// Exists so `jcode-sdk` can hold one handle for a shutdown trigger while
+    /// the transport splits into reader and writer halves, with one code path
+    /// across platforms.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             handle: self.handle.try_clone()?,
         })
+    }
+
+    /// Best-effort close, mirroring `UnixStream::shutdown`.
+    ///
+    /// A named pipe has no half-close; dropping the duplicated handle is the
+    /// closest equivalent, and the read side observes it as EOF once every
+    /// other handle is gone. Callers treat this as advisory (the Unix side
+    /// ignores its error too).
+    pub fn shutdown(&self, _how: std::net::Shutdown) -> io::Result<()> {
+        // Nothing to do beyond letting handles drop: TransactNamedPipe-style
+        // half-close is not exposed through std::fs::File.
+        Ok(())
     }
 
     pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {

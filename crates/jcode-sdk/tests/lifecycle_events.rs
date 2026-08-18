@@ -1,6 +1,10 @@
 //! Lifecycle and all-session event behavior which cannot be exercised by the
 //! protocol-only socket-pair tests.
 
+// Unix-only because the MOCK HARNESS below scripts a real Unix socket pair;
+// the SDK itself is cross-platform (named pipe on Windows). Without the gate
+// this file fails to COMPILE on Windows, breaking `cargo test --workspace`
+// before a single test runs. Keep it until the mock server speaks named pipes.
 #![cfg(unix)]
 
 use jcode_harness_api::{
