@@ -2093,11 +2093,17 @@ pub(super) fn delete_input_word_back(app: &mut App) {
         // insertions would.
         let removed = app.input[start..app.cursor_pos].chars().count();
         crate::logging::info(&format!(
+
             "input word-delete: removed {} chars at cursor {} (input had {} chars) via {:?}",
+
             removed,
+
             app.cursor_pos,
+
             app.input.chars().count(),
+
             crate::tui::ui::frame_input_attribution_snapshot().event,
+
         ));
     }
     app.input.drain(start..app.cursor_pos);
