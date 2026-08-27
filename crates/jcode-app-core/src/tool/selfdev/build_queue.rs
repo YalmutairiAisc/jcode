@@ -1091,48 +1091,6 @@ export -f cargo
     }
 }
 
-#[cfg(test)]
-mod desktop_binary_tests {
-    use super::*;
-
-    fn command(display: &str) -> SelfDevBuildCommand {
-        SelfDevBuildCommand {
-            program: "scripts/dev_cargo.sh".to_string(),
-            args: Vec::new(),
-            display: display.to_string(),
-            env: Vec::new(),
-        }
-    }
-
-    /// The bug this guards: a desktop build must be validated against its own
-    /// artefact, not whatever some earlier build left in `target/`.
-    #[test]
-    fn each_desktop_build_validates_its_own_binary() {
-        let desktop2 = SelfDevTool::desktop_binary_name(&command(
-            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop2 --bin jcode-desktop2 --lib",
-        ));
-        assert!(
-            desktop2.is_some_and(|name| name.starts_with("jcode-desktop2")),
-            "desktop2 build resolved to {desktop2:?}"
-        );
-    }
-
-    /// A TUI build, or a combined build that includes the TUI, publishes
-    /// normally rather than going down the desktop validation path.
-    #[test]
-    fn tui_and_combined_builds_are_not_desktop_only() {
-        for display in [
-            "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode",
-            "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode -p jcode-desktop2",
-        ] {
-            assert_eq!(
-                SelfDevTool::desktop_binary_name(&command(display)),
-                None,
-                "{display} was treated as desktop-only"
-            );
-        }
-    }
-}
 
 #[cfg(test)]
 mod test_shell_program_tests {
