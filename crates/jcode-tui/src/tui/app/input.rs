@@ -437,9 +437,28 @@ mod tests {
 
         let quoted = parse_dropped_paths(&format!("'{}'", first.display())).unwrap();
         assert_eq!(quoted, vec![first.clone()]);
-        let escaped =
-            parse_dropped_paths(&first.display().to_string().replace(' ', "\\ ")).unwrap();
-        assert_eq!(escaped, vec![first.clone()]);
+        // Backslash-escaped spaces are a Unix terminal convention. On Windows
+        // `\` separates path components, so the same input is a literal path.
+        #[cfg(not(windows))]
+        {
+            let escaped =
+                parse_dropped_paths(&first.display().to_string().replace(' ', "\\ ")).unwrap();
+            assert_eq!(escaped, vec![first.clone()]);
+        }
+        #[cfg(windows)]
+        {
+            // Must go through the TOKENIZER, so quote it: a bare path returns
+            // early via the `is_file()` fast path and would pass even with the
+            // separator-eating bug still present. Two paths also force the
+            // tokenizer, which is how a real multi-file drop arrives.
+            let both = format!("\"{}\" \"{}\"", first.display(), second.display());
+            assert_eq!(
+                parse_dropped_paths(&both).unwrap(),
+                vec![first.clone(), second.clone()],
+                "Windows separators must survive tokenizing; treating `\\` as a \
+                 shell escape turns C:\\Users\\me into C:Usersme and matches no file"
+            );
+        }
         let url = url::Url::from_file_path(&second).unwrap();
         assert_eq!(parse_dropped_paths(url.as_str()).unwrap(), vec![second]);
     }
@@ -802,7 +821,11 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
         if escaped {
             token.push(ch);
             escaped = false;
-        } else if ch == '\\' && quote != Some('\'') {
+        // On Windows `\` is the path separator, not a shell escape: treating
+        // it as one silently ate every separator in a dropped path, so
+        // `C:\Users\me\a.png` parsed as `C:Usersmea.png` and matched no file.
+        // Terminals there quote spaces instead, which the quote arm handles.
+        } else if ch == '\\' && !cfg!(windows) && quote != Some('\'') {
             escaped = true;
         } else if matches!(ch, '\'' | '"') {
             if quote == Some(ch) {

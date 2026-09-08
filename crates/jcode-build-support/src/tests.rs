@@ -778,7 +778,9 @@ fn write_versioned_binary(version: &str, mtime: std::time::SystemTime) -> PathBu
     std::fs::create_dir_all(&dir).expect("create version dir");
     let path = dir.join(binary_name());
     std::fs::write(&path, format!("bin {version}")).expect("write binary");
-    std::fs::File::open(&path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .expect("open binary")
         .set_modified(mtime)
         .expect("set mtime");

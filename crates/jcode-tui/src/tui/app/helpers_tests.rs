@@ -312,7 +312,11 @@ fn pinned_resume_test_home() -> (
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");
     std::fs::create_dir_all(&current).expect("create builds/current");
-    std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
+    // `binary_name()`, not "jcode": the resolver looks for `jcode.exe` on
+    // Windows, so a fixture hardcoding the Unix name matched nothing and the
+    // test silently fell through to `current_exe()`, the test harness binary.
+    std::fs::write(current.join(crate::build::binary_name()), b"#!/bin/sh\n")
+        .expect("write fake jcode binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     (env_lock, temp, home)
 }
@@ -330,7 +334,7 @@ fn build_resume_command_uses_imported_jcode_session_for_claude_code() {
 
     assert_eq!(
         program.file_name().and_then(|name| name.to_str()),
-        Some("jcode")
+        Some(crate::build::binary_name())
     );
     assert_eq!(
         args,
@@ -357,7 +361,7 @@ fn build_resume_command_uses_imported_jcode_session_for_codex() {
 
     assert_eq!(
         program.file_name().and_then(|name| name.to_str()),
-        Some("jcode")
+        Some(crate::build::binary_name())
     );
     assert_eq!(
         args,

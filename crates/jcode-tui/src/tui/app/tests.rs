@@ -1496,7 +1496,12 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(crate::build::binary_name());
         std::fs::write(&path, format!("bin {version}")).unwrap();
-        std::fs::File::open(&path)
+        // Opened for WRITE, not read: Windows requires write access to set a
+        // file's mtime, so `File::open` failed here with PermissionDenied and
+        // the test could never reach the assertion it exists to make.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(mtime)
             .unwrap();

@@ -1010,7 +1010,9 @@ mod newest_reload_candidate_integration_tests {
         std::fs::create_dir_all(&dir).expect("create version dir");
         let path = dir.join(build::binary_name());
         std::fs::write(&path, format!("binary for {version}")).expect("write binary");
-        std::fs::File::open(&path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .expect("open binary")
             .set_modified(mtime)
             .expect("set mtime");
@@ -1195,7 +1197,9 @@ mod newest_reload_candidate_integration_tests {
         std::fs::create_dir_all(&dir).expect("create version dir");
         let payload = dir.join("jcode-linux-x86_64.bin");
         std::fs::write(&payload, format!("payload for {version}")).expect("write payload");
-        std::fs::File::open(&payload)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&payload)
             .expect("open payload")
             .set_modified(payload_mtime)
             .expect("set payload mtime");
@@ -1205,7 +1209,9 @@ mod newest_reload_candidate_integration_tests {
             "#!/usr/bin/env sh\nexec ./jcode-linux-x86_64.bin \"$@\"\n",
         )
         .expect("write wrapper");
-        std::fs::File::open(&wrapper)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wrapper)
             .expect("open wrapper")
             .set_modified(wrapper_mtime)
             .expect("set wrapper mtime");
