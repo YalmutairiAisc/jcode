@@ -61,6 +61,8 @@ pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
 };
 pub(super) use server_events::handle_server_event;
+#[cfg(test)]
+pub(in crate::tui::app) use server_events::is_provider_overload_error_for_test;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);

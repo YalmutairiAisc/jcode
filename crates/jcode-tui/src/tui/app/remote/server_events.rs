@@ -27,6 +27,13 @@ fn is_provider_overload_error(message: &str) -> bool {
     message.to_ascii_lowercase().contains("overloaded")
 }
 
+/// Test-only re-export so the wire-shape test in `tests/` can drive the real
+/// classifier against the server-composed error chain.
+#[cfg(test)]
+pub(in crate::tui::app) fn is_provider_overload_error_for_test(message: &str) -> bool {
+    is_provider_overload_error(message)
+}
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }

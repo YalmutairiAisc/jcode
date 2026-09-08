@@ -154,9 +154,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("missing.sock");
 
-        let err = connect_swarm_socket(&socket_path)
-            .await
-            .expect_err("missing socket should fail");
+        // `expect_err` would require the Ok type (`Stream`) to be Debug,
+        // which it is not; match instead, rather than widening a public
+        // type's derives just to satisfy a test.
+        let err = match connect_swarm_socket(&socket_path).await {
+            Ok(_) => panic!("missing socket should fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
     }

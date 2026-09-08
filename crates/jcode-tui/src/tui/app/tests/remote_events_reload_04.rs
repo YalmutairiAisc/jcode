@@ -2584,3 +2584,40 @@ fn test_non_overload_error_still_fails_a_manual_turn_fast() {
         "a non-overload error on a manual turn must not be silently resent"
     );
 }
+
+/// The classifier must match the string the SERVER actually composes.
+///
+/// The wire path is: provider exhausts retries ->
+/// `anyhow!("Failed after {n} retries: {last_error}")` ->
+/// `format_error_chain` joins the chain -> `ServerEvent::Error.message`.
+/// So the client never sees the bare provider error; it sees the wrapped
+/// chain. A classifier tested only against the provider-side string could
+/// pass while missing every real event. This pins the composed shape,
+/// built by the same `format_error_chain` the server calls.
+#[test]
+fn test_overload_classifier_matches_server_composed_error_chain() {
+    // Passed as an argument, not as the format string: this is verbatim provider
+    // JSON, and `anyhow!` would read its braces as format placeholders.
+    let provider_error = anyhow::anyhow!(
+        "{}",
+        r#"Retryable stream error: {"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CeAWymUK3JtAfj8KPAhTq"}"#
+    );
+    let exhausted = provider_error.context("Failed after 3 retries");
+    let wire_message = crate::util::format_error_chain(&exhausted);
+
+    assert!(
+        wire_message.contains("Failed after 3 retries"),
+        "fixture must reproduce the retry-exhaustion wrapper: {wire_message}"
+    );
+    assert!(
+        super::remote::is_provider_overload_error_for_test(&wire_message),
+        "the classifier must match the server-composed chain, not just the \
+         bare provider string: {wire_message}"
+    );
+    assert!(
+        !super::remote::is_provider_overload_error_for_test(
+            "Failed after 3 retries: 429 too many requests"
+        ),
+        "rate limits have their own Retry-After path and must not match"
+    );
+}

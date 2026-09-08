@@ -21,6 +21,12 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
+/// Whether this process is an automation-driven debug client rather than a
+/// user-owned terminal.
+///
+/// Only `arm_debug_client_parent_death_signal` consumes this, and PR_SET_PDEATHSIG
+/// exists only on Linux, so the non-test build of every other platform has no
+/// caller. The `test` arm keeps the behavior under test everywhere.
 #[cfg(any(target_os = "linux", test))]
 fn is_file_controlled_debug_client() -> bool {
     std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()

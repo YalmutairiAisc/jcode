@@ -248,6 +248,10 @@ fn registry_still_matches(session: &LiveClaudeSession) -> bool {
     })
 }
 
+/// Drop the registry record for a session we just confirmed exited.
+///
+/// Only the Linux takeover path reaches this: every other platform bails out of
+/// `stop_live_claude_session` before a process is ever signaled.
 #[cfg(target_os = "linux")]
 fn remove_registry_if_same(session: &LiveClaudeSession) {
     if registry_still_matches(session) {
