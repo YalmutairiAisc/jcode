@@ -1,9 +1,8 @@
 //! Private, bounded stdin receiver for explicitly approved credential transfers.
 //! There is deliberately no CLI export command that could print credentials.
 use super::provider_init::ProviderChoice;
-use crate::auth::transfer::{self, MAX_TRANSFER_BYTES, TransferProvider};
+use crate::auth::transfer::{self, TransferProvider};
 use anyhow::Result;
-use std::io::IsTerminal;
 
 fn selected_provider(choice: &ProviderChoice) -> Result<TransferProvider, &'static str> {
     match choice {
@@ -17,6 +16,11 @@ fn selected_provider(choice: &ProviderChoice) -> Result<TransferProvider, &'stat
 // Poll the pipe directly instead, bounding the lifetime even if its writer stalls.
 #[cfg(unix)]
 fn read_private_stdin() -> Result<Vec<u8>, &'static str> {
+    // Scoped here, not at module level: the non-Unix build has no other
+    // user for either, and unused-import warnings on Windows are how a
+    // real warning gets lost.
+    use crate::auth::transfer::MAX_TRANSFER_BYTES;
+    use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
     let stdin = std::io::stdin();
