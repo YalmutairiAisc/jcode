@@ -801,7 +801,12 @@ impl AnthropicProvider {
     }
 
     fn model_supports_priority_service_tier(model: &str) -> bool {
-        Self::normalized_model_key(model).contains("claude-opus-4-8")
+        // Shared capability table, beside the reasoning ladder; see
+        // `jcode_provider_core::anthropic_supports_priority_service_tier`.
+        // This was `normalized_model_key(model).contains("claude-opus-4-8")`,
+        // which refused every later Opus -- including Opus 5 -- with a message
+        // that named Anthropic for what was Jcode's own hardcoded literal.
+        jcode_provider_core::anthropic_supports_priority_service_tier(model)
     }
 
     fn normalize_service_tier(raw: &str) -> Result<Option<String>> {
@@ -1433,7 +1438,10 @@ impl Provider for AnthropicProvider {
         if normalized.as_deref() == Some("auto")
             && !Self::model_supports_priority_service_tier(&self.model())
         {
-            anyhow::bail!("Anthropic priority fast tier is only supported for Claude Opus 4.8");
+            anyhow::bail!(
+                "Anthropic priority fast tier requires Claude Opus 4.8 or later; the current model is {}",
+                self.model()
+            );
         }
         *self
             .service_tier

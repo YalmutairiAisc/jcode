@@ -365,6 +365,44 @@ pub fn anthropic_reasoning_caps(model: &str) -> AnthropicReasoningCaps {
     }
 }
 
+/// Whether a model may request Anthropic's latency-optimized (priority) service
+/// tier, sent on the wire as `service_tier: "auto"` and surfaced in the TUI as
+/// `/fast on`.
+///
+/// This was a substring match on the single literal `claude-opus-4-8`, living in
+/// the runtime crate rather than here. That refused Opus 5 with "priority fast
+/// tier is only supported for Claude Opus 4.8" — a message about Jcode's table,
+/// phrased as a fact about Anthropic.
+///
+/// The same reasoning `anthropic_reasoning_caps` documents applies here: the
+/// runtime already handles a rejected request, so an optimistic table degrades
+/// gracefully while a pessimistic one silently disables the feature until
+/// somebody probes the model and edits a literal. Version comparison, not
+/// substring matching, is what keeps a new generation working on the day it
+/// ships.
+///
+/// Priority tier is an account-level entitlement as well as a model capability,
+/// so a `true` here is permission to ASK, never a guarantee of the answer.
+pub fn anthropic_supports_priority_service_tier(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return false;
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return false;
+    };
+    match family {
+        // Opus 4.8 was the first to offer it; every later Opus keeps it.
+        Some("opus") => version >= (4, 8),
+        // No other family has been observed offering the tier. Unlike the
+        // reasoning ladder, this is NOT optimistic for unknown families: an
+        // unsupported `service_tier` is rejected by the API for the whole
+        // request, and there is no field-stripping retry for it.
+        _ => false,
+    }
+}
+
 pub fn anthropic_map_tool_name_for_oauth(name: &str) -> String {
     match name {
         "bash" => "Bash",
@@ -584,6 +622,43 @@ mod tests {
             anthropic_reasoning_caps("claude-opus-4.6"),
             anthropic_reasoning_caps("claude-opus-4-6")
         );
+    }
+
+    #[test]
+    fn priority_service_tier_follows_version_not_a_literal() {
+        // The regression this exists for: the gate was
+        // `model.contains("claude-opus-4-8")`, so selecting Opus 5 failed with
+        // "priority fast tier is only supported for Claude Opus 4.8" -- a
+        // statement about Jcode's table, worded as a fact about Anthropic.
+        assert!(
+            anthropic_supports_priority_service_tier("claude-opus-5"),
+            "Opus 5 is later than 4.8 and must not be refused by a literal"
+        );
+        for model in ["claude-opus-4-8", "claude-opus-5-1", "claude-opus-6"] {
+            assert!(
+                anthropic_supports_priority_service_tier(model),
+                "{model} should be allowed to request the priority tier"
+            );
+        }
+        // Earlier Opus, and every other family, stay out. Unlike the reasoning
+        // ladder this is deliberately pessimistic: a bad `service_tier` fails
+        // the whole request and there is no field-stripping retry.
+        for model in [
+            "claude-opus-4-5",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-haiku-5",
+            "claude-fable-5",
+            "gpt-5.5",
+            "",
+        ] {
+            assert!(
+                !anthropic_supports_priority_service_tier(model),
+                "{model} must not claim the priority tier"
+            );
+        }
+        // Suffix handling matches the reasoning table.
+        assert!(anthropic_supports_priority_service_tier("claude-opus-5-1m"));
     }
 
     #[test]
