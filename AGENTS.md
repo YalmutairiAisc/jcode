@@ -83,9 +83,17 @@ it takes the two locks.
 
 ## Known: the suite is not isolated under parallelism
 
-`--test-threads=1` is green (2270 passed / 0 failed). At the default thread
-count, 3-7 tests fail per run and **the set changes every run**. They pass
-individually and serially. This is test isolation, not product behavior.
+`--test-threads=1` is green for `jcode-tui` (2270 passed / 0 failed). At the
+default thread count, 3-7 tests fail per run and **the set changes every run**.
+They pass individually and serially. This is test isolation, not product
+behavior.
+
+That figure is per-crate and does not generalize. `jcode-app-core` run serially
+is **1168 passed / 36 failed** (measured 2026-09-09 on Windows), and those 36
+are stable across runs rather than shifting, so they are ordinary failures
+rather than an isolation problem. Two of its tests also used to hang forever
+rather than fail, which is why no serial figure existed for it at all before:
+see "A hang is not a failure" below.
 
 The cause is that env vars are process-global while ~800 tests read them
 concurrently. `lock_test_env` only excludes other env-*mutating* tests, so a
@@ -119,3 +127,39 @@ A working fix needs the read guard to be scoped to the test, which means
 returning it to the test body rather than parking it. `create_test_app` returns
 `App`, so that is a signature change across ~950 call sites, or a new
 `create_test_app_guarded` adopted by the tests that need it.
+
+## A hang is not a failure, and it hides everything after it
+
+`jcode-app-core` had two tests that never returned:
+`handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy` and
+`assert_model_catalog_service_tier`. Serially, the run wedged there and every
+later test silently never ran, so the crate had no trustworthy serial figure at
+all. Fixed in `3bef09b38`.
+
+The cause is worth recognizing because the code looks correct:
+
+```rust
+let (_reader_a, writer_a) = stream_a.into_split();
+// ...
+drop(writer);            // looks like "close the stream"
+stream_b.read_to_end(&mut bytes).await;   // waits forever
+```
+
+`into_split` uses `tokio::io::split`, so **both halves own the same stream**.
+Dropping the writer does not close anything while `_reader_a` is still in
+scope, and the peer's `read_to_end` waits for an EOF that cannot arrive. On
+Windows the halves wrap a named pipe, where this is reliably fatal. Drop the
+read half too.
+
+The `_`-prefix is what makes this invisible: it reads as "intentionally
+unused", when it is in fact load-bearing. If you see `_reader` paired with a
+`read_to_end` on the peer, that is the bug.
+
+Diagnosing a hang, as opposed to a failure:
+
+- Sample CPU twice a few seconds apart. Frozen CPU means blocked, not slow.
+  `(Get-Process -Id <pid>).CPU` on Windows.
+- Run the suspect alone under `timeout`. Exit code 124 confirms it.
+- A hung test binary keeps a lock on its own `.exe`, so the next build fails
+  with `cannot open output file ... Permission denied` from the linker. That
+  error means "kill the stale test process", not "the build is broken".
