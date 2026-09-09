@@ -136,8 +136,11 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         let guard = agent.lock().await;
         guard.session_id().to_string()
     };
+    // The point of this case is a session on disk with no conversation, so
+    // `queue_soft_interrupt_for_session` can find it once the live queue is
+    // gone. `save` skips exactly that shape; `save_explicit` is the opt-out.
     crate::session::Session::create_with_id(session_id.clone(), None, None)
-        .save()
+        .save_explicit()
         .expect("save session snapshot");
 
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
