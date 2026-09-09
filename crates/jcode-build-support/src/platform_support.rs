@@ -1,5 +1,26 @@
 use std::path::Path;
 
+/// Delete the rename-aside binaries a previous swap could not remove.
+///
+/// Windows refuses to delete an executable while a process still has it
+/// loaded, so the swap below can only try. Nothing retried, and the orphans
+/// accumulated indefinitely (9+ GB on a self-dev machine). Sweeping on every
+/// swap collects each one as soon as the process holding it exits.
+#[cfg(windows)]
+fn remove_stale_rename_aside(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".jcode-launcher-old-") || name.contains(".exe.old-") {
+            // Still-loaded binaries fail here and are retried on the next swap.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Set file permissions to owner read/write/execute (0o755).
 /// No-op on Windows (executability is determined by file extension).
 pub fn set_permissions_executable(path: &Path) -> std::io::Result<()> {
@@ -74,11 +95,13 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
             return Err(error);
         }
 
-        // An old loaded executable cannot be deleted until its process exits.
-        // Best-effort cleanup is safe; later installs can remove leftovers.
+        // An old loaded executable cannot be deleted until its process exits,
+        // so this only succeeds when nothing holds it. The sweep below is what
+        // actually collects the leftovers, on a later swap once they are free.
         if moved_old {
             let _ = std::fs::remove_file(old);
         }
+        remove_stale_rename_aside(dst.parent().unwrap_or_else(|| Path::new(".")));
     }
     Ok(())
 }
@@ -105,5 +128,31 @@ mod tests {
                 .join(format!(".jcode-launcher-old-{}.exe", std::process::id()))
                 .exists()
         );
+    }
+
+    #[test]
+    fn windows_swap_sweeps_orphans_left_by_earlier_swaps() {
+        // Orphans accumulate because a loaded .exe cannot be deleted at the
+        // moment it is renamed aside. A later swap must collect them.
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let src = dir.path().join("source.exe");
+        let dst = dir.path().join("jcode.exe");
+        let temp = dir.path().join(".jcode-current");
+        std::fs::write(&src, b"new binary").expect("source");
+        std::fs::write(&dst, b"old binary").expect("destination");
+
+        let launcher_orphan = dir.path().join(".jcode-launcher-old-1234-5678.exe");
+        let rotated_orphan = dir.path().join("jcode.exe.old-1786576183");
+        let unrelated = dir.path().join("keep-me.exe");
+        for path in [&launcher_orphan, &rotated_orphan, &unrelated] {
+            std::fs::write(path, b"stale").expect("orphan");
+        }
+
+        atomic_symlink_swap(&src, &dst, &temp).expect("swap succeeds");
+
+        assert!(!launcher_orphan.exists(), "launcher orphan should be swept");
+        assert!(!rotated_orphan.exists(), "rotated orphan should be swept");
+        assert!(unrelated.exists(), "unrelated files must survive the sweep");
+        assert_eq!(std::fs::read(&dst).expect("new launcher"), b"new binary");
     }
 }

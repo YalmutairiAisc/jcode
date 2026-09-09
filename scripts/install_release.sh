@@ -124,6 +124,10 @@ if [[ "$is_windows" == "1" ]]; then
       exit 1
     fi
     chmod 755 "$target"
+    # The rotated copy is only deletable once its process exits, so sweep every
+    # leftover here rather than just this run's. Without it they accumulate at
+    # ~370 MB per install.
+    rm -f "$(dirname "$target")"/*.old-* 2>/dev/null || true
     echo "Installed: $target"
   }
 
