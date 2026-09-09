@@ -17,6 +17,102 @@ type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<S
 
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
+const AGENT_LOCK_WAIT: Duration = Duration::from_secs(2);
+/// How long the background retry keeps waiting for a stuck task to release
+/// the agent lock before giving up for good.
+const AGENT_LOCK_BACKGROUND_WAIT: Duration = Duration::from_secs(120);
+
+/// Run `make_future` under `AGENT_LOCK_WAIT`. If the lock is still held by a
+/// stuck task, hand the retry to a background task instead of dropping the
+/// finalization on the floor.
+async fn run_with_deferred_retry<Fut, F>(session_id: String, make_future: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    if tokio::time::timeout(AGENT_LOCK_WAIT, make_future())
+        .await
+        .is_ok()
+    {
+        return;
+    }
+
+    crate::logging::warn(&format!(
+        "Session {} cleanup still waiting on the agent lock after {:?}; finalizing in the background",
+        session_id, AGENT_LOCK_WAIT
+    ));
+    tokio::spawn(async move {
+        if tokio::time::timeout(AGENT_LOCK_BACKGROUND_WAIT, make_future())
+            .await
+            .is_err()
+        {
+            crate::logging::warn(&format!(
+                "Session {} never released the agent lock within {:?}; graceful shutdown skipped",
+                session_id, AGENT_LOCK_BACKGROUND_WAIT
+            ));
+        } else {
+            crate::logging::info(&format!(
+                "Session {} finalized in the background after a delayed agent lock",
+                session_id
+            ));
+        }
+    });
+}
+
+/// Mark the agent, emit the runtime-memory event, and kick off final memory
+/// extraction. Assumes the caller already holds nothing but the agent Arc.
+async fn finalize_agent(
+    agent_arc: Arc<Mutex<Agent>>,
+    client_session_id: String,
+    disposition: DisconnectDisposition,
+) {
+    let mut agent = agent_arc.lock().await;
+    match disposition {
+        DisconnectDisposition::Closed => {
+            agent.mark_closed();
+        }
+        DisconnectDisposition::Reloading => {
+            agent.mark_crashed(Some("Server reload interrupted processing".to_string()));
+        }
+        DisconnectDisposition::Crashed => {
+            agent.mark_crashed(Some("Client disconnected while processing".to_string()));
+        }
+    }
+
+    let transcript = if agent.memory_enabled() {
+        Some(agent.build_transcript_for_extraction())
+    } else {
+        None
+    };
+    let working_dir = agent.working_dir().map(|dir| dir.to_string());
+    drop(agent);
+
+    let event = match disposition {
+        DisconnectDisposition::Closed => crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+            "session_closed",
+            "client_disconnected",
+        ),
+        DisconnectDisposition::Crashed => crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+            "session_crashed",
+            "client_disconnected_while_processing",
+        ),
+        DisconnectDisposition::Reloading => crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+            "session_reloading",
+            "server_reload_disconnect",
+        ),
+    }
+    .with_session_id(client_session_id.clone())
+    .force_attribution();
+    crate::runtime_memory_log::emit_event(event);
+
+    if let Some(transcript) = transcript {
+        crate::memory_agent::trigger_final_extraction_with_dir(
+            transcript,
+            client_session_id,
+            working_dir,
+        );
+    }
+}
 
 // The last registered event sender remains on the member after it detaches.
 // It is therefore also an ownership witness: an old grace timer must not
@@ -201,74 +297,12 @@ pub(super) async fn cleanup_client_connection(
 
     {
         if let Some(agent_arc) = super::remove_session_entry(sessions, client_session_id).await {
-            let lock_result =
-                tokio::time::timeout(std::time::Duration::from_secs(2), agent_arc.lock()).await;
-
-            match lock_result {
-                Ok(mut agent) => {
-                    match disposition {
-                        DisconnectDisposition::Closed => {
-                            agent.mark_closed();
-                        }
-                        DisconnectDisposition::Reloading => {
-                            agent.mark_crashed(Some(
-                                "Server reload interrupted processing".to_string(),
-                            ));
-                        }
-                        DisconnectDisposition::Crashed => {
-                            agent.mark_crashed(Some(
-                                "Client disconnected while processing".to_string(),
-                            ));
-                        }
-                    }
-
-                    let memory_enabled = agent.memory_enabled();
-                    let transcript = if memory_enabled {
-                        Some(agent.build_transcript_for_extraction())
-                    } else {
-                        None
-                    };
-                    let sid = client_session_id.to_string();
-                    let working_dir = agent.working_dir().map(|dir| dir.to_string());
-                    drop(agent);
-                    let event = match disposition {
-                        DisconnectDisposition::Closed => {
-                            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                                "session_closed",
-                                "client_disconnected",
-                            )
-                        }
-                        DisconnectDisposition::Crashed => {
-                            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                                "session_crashed",
-                                "client_disconnected_while_processing",
-                            )
-                        }
-                        DisconnectDisposition::Reloading => {
-                            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                                "session_reloading",
-                                "server_reload_disconnect",
-                            )
-                        }
-                    }
-                    .with_session_id(sid.clone())
-                    .force_attribution();
-                    crate::runtime_memory_log::emit_event(event);
-                    if let Some(transcript) = transcript {
-                        crate::memory_agent::trigger_final_extraction_with_dir(
-                            transcript,
-                            sid,
-                            working_dir,
-                        );
-                    }
-                }
-                Err(_) => {
-                    crate::logging::warn(&format!(
-                        "Session {} cleanup timed out waiting for agent lock (stuck task); skipping graceful shutdown",
-                        client_session_id
-                    ));
-                }
-            }
+            let sid = client_session_id.to_string();
+            let finalize_sid = sid.clone();
+            run_with_deferred_retry(sid, move || {
+                finalize_agent(Arc::clone(&agent_arc), finalize_sid.clone(), disposition)
+            })
+            .await;
         }
     }
 
@@ -355,7 +389,78 @@ mod grace_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{DisconnectDisposition, disconnect_disposition, disconnected_while_processing};
+    use super::{
+        AGENT_LOCK_WAIT, DisconnectDisposition, disconnect_disposition,
+        disconnected_while_processing, run_with_deferred_retry,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn finalization_runs_inline_when_the_lock_is_free() {
+        let lock = Arc::new(Mutex::new(0u32));
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let task_lock = Arc::clone(&lock);
+        let task_ran = Arc::clone(&ran);
+        run_with_deferred_retry("sess-free".to_string(), move || {
+            let lock = Arc::clone(&task_lock);
+            let ran = Arc::clone(&task_ran);
+            async move {
+                let mut guard = lock.lock().await;
+                *guard += 1;
+                ran.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(*lock.lock().await, 1);
+    }
+
+    /// The bug this guards: a stuck task holding the agent lock made cleanup log
+    /// a warning and skip marking the session closed entirely. Finalization must
+    /// still happen once the lock is released.
+    #[tokio::test]
+    async fn finalization_is_retried_after_a_stuck_task_releases_the_lock() {
+        let lock = Arc::new(Mutex::new(0u32));
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let held = Arc::clone(&lock).lock_owned().await;
+
+        let task_lock = Arc::clone(&lock);
+        let task_ran = Arc::clone(&ran);
+        run_with_deferred_retry("sess-stuck".to_string(), move || {
+            let lock = Arc::clone(&task_lock);
+            let ran = Arc::clone(&task_ran);
+            async move {
+                let mut guard = lock.lock().await;
+                *guard += 1;
+                ran.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+
+        // Inline attempt timed out, so nothing has run yet.
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+        drop(held);
+        for _ in 0..200 {
+            if ran.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "finalization must run in the background once the lock frees"
+        );
+        assert_eq!(*lock.lock().await, 1);
+        assert!(AGENT_LOCK_WAIT < std::time::Duration::from_secs(10));
+    }
 
     #[test]
     fn idle_disconnect_is_closed() {
