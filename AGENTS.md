@@ -42,3 +42,38 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Running the test suite on Windows
+
+`cargo test -p jcode-tui --lib` deadlocks on Windows at the default thread count.
+Use a low one:
+
+```bash
+cargo test -p jcode-tui --lib -- --test-threads=2
+```
+
+This is not a slow suite, it is a hang. Every worker blocks and the run never
+finishes, so whatever had not been reached yet is silently never tested. That is
+how a batch of real Windows failures survived for months: the suite never got far
+enough to report them.
+
+What is established, measured on a 16-core machine:
+
+| `--test-threads` | result |
+|---|---|
+| 1 | 0 hangs, whole suite in ~127s |
+| 2 | 0 hangs, ~89s (fastest) |
+| 4 | 4 hang |
+| 8 | 8 hang |
+| 16 (default) | 16 hang |
+
+Exactly `--test-threads` many wedge, i.e. all of them. A gdb thread dump
+(`gdb -p <pid> --batch -ex "thread apply all bt"`) shows them split across
+`jcode_base::storage::lock_test_env` and `jcode_tui::tui::ui::render_state_test_lock`
+with **no thread holding either lock**, so a guard is leaking from a worker that
+is already gone. Which test leaks it is not yet identified: the wedged set is just
+whatever was in flight, and it moves with the thread count.
+
+Ruled out so far: it is not the SSH tests (that group alone passes at 4 threads),
+and it is not a live network call under the lock (`JCODE_OFFLINE=1` still hangs).
+This reproduces on upstream `master`, so it is not specific to any one branch.
