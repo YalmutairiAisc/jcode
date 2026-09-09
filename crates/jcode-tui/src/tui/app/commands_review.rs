@@ -170,21 +170,43 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
     }
 }
 
+/// Drop rendered reasoning lines from a transcript the judge will read.
+///
+/// `render_messages` includes persisted reasoning whenever the *display* mode
+/// is `Full`, which is the default for anyone with `show_thinking` on. The
+/// judge transcript is meant to be what the user actually saw, and reasoning is
+/// explicitly excluded from it, so leaving this to a display setting means the
+/// hidden trace leaks into a spawned judge session on most machines.
+///
+/// Reasoning lines are marked with `REASONING_SENTINEL`, so filtering on it is
+/// exact and does not depend on any config.
+fn strip_reasoning_lines(rendered: &str) -> String {
+    if !rendered.contains(jcode_tui_markdown::REASONING_SENTINEL) {
+        return rendered.to_string();
+    }
+    rendered
+        .lines()
+        .filter(|line| !line.contains(jcode_tui_markdown::REASONING_SENTINEL))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
     for rendered in crate::session::render_messages(parent_session) {
         match rendered.role.as_str() {
             "user" => {
-                if !rendered.content.trim().is_empty() {
+                let content = strip_reasoning_lines(&rendered.content);
+                if !content.trim().is_empty() {
                     transcript.push(judge_transcript_text_message(
                         Role::User,
-                        rendered.content.trim().to_string(),
+                        content.trim().to_string(),
                     ));
                 }
             }
             "assistant" => {
-                let mut text = rendered.content.trim().to_string();
+                let mut text = strip_reasoning_lines(&rendered.content).trim().to_string();
                 if !rendered.tool_calls.is_empty() {
                     let visible_tools = rendered
                         .tool_calls
