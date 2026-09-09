@@ -458,6 +458,16 @@ mod tests {
                 "Windows separators must survive tokenizing; treating `\\` as a \
                  shell escape turns C:\\Users\\me into C:Usersme and matches no file"
             );
+            // ...and `\ ` must still unescape, because that is what a terminal
+            // emits for a dropped path containing a space. Both behaviors have
+            // to hold at once: `\` before a space is an escape, `\` anywhere
+            // else is a separator.
+            let escaped = first.display().to_string().replace(' ', "\\ ");
+            assert_eq!(
+                parse_dropped_paths(&escaped).unwrap(),
+                vec![first.clone()],
+                "a terminal-escaped space must still normalize on Windows"
+            );
         }
         let url = url::Url::from_file_path(&second).unwrap();
         assert_eq!(parse_dropped_paths(url.as_str()).unwrap(), vec![second]);
@@ -760,7 +770,15 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
 fn format_dropped_path(path: &std::path::Path, quote_whitespace: bool) -> String {
     let value = path.to_string_lossy();
     if quote_whitespace && value.chars().any(char::is_whitespace) {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        // Inside double quotes the parser only unescapes `\ `, so on Windows a
+        // separator needs no doubling. Doubling it anyway produced the literal
+        // `C:\\Users\\me` in the composer, a path that no longer opens.
+        let escaped = if cfg!(windows) {
+            value.replace('"', "\\\"")
+        } else {
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        };
+        format!("\"{escaped}\"")
     } else {
         value.into_owned()
     }
@@ -817,15 +835,21 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in trimmed.chars() {
+    let chars: Vec<char> = trimmed.chars().collect();
+    for (index, &ch) in chars.iter().enumerate() {
         if escaped {
             token.push(ch);
             escaped = false;
-        // On Windows `\` is the path separator, not a shell escape: treating
-        // it as one silently ate every separator in a dropped path, so
-        // `C:\Users\me\a.png` parsed as `C:Usersmea.png` and matched no file.
-        // Terminals there quote spaces instead, which the quote arm handles.
-        } else if ch == '\\' && !cfg!(windows) && quote != Some('\'') {
+        // On Windows `\` is both the path separator and, before a space, the
+        // escape a terminal emits for a dropped path. Only `\ ` is
+        // unambiguous: a real path component never starts with a space, so
+        // every other `\` is a separator and must survive. Treating them all
+        // as escapes ate the separators, turning `C:\Users\me\a.png` into
+        // `C:Usersmea.png`, which matched no file.
+        } else if ch == '\\'
+            && quote != Some('\'')
+            && (!cfg!(windows) || chars.get(index + 1) == Some(&' '))
+        {
             escaped = true;
         } else if matches!(ch, '\'' | '"') {
             if quote == Some(ch) {
