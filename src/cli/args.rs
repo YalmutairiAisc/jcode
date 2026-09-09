@@ -640,10 +640,6 @@ pub(crate) enum ServerCommand {
         json: bool,
     },
 
-    /// Internal: hold a lightweight connection open until stdin closes.
-    #[command(hide = true)]
-    Keepalive,
-
     /// Pin the shared server channel to an installed version.
     ///
     /// Defaults to the active `current` version. This only selects the daemon's

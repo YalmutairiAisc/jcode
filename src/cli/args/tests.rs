@@ -79,7 +79,7 @@ fn native_server_stdio_preserves_socket_override() {
 }
 
 #[test]
-fn server_start_and_internal_keepalive_parse() {
+fn server_start_parses_and_retired_keepalive_does_not() {
     let args = Args::try_parse_from(["jcode", "server", "start", "--json"])
         .expect("server start should parse");
     assert!(matches!(
@@ -89,14 +89,13 @@ fn server_start_and_internal_keepalive_parse() {
         })
     ));
 
-    let keepalive = Args::try_parse_from(["jcode", "server", "keepalive"])
-        .expect("internal server keepalive should parse");
-    assert!(matches!(
-        keepalive.command,
-        Some(Command::Server {
-            action: ServerCommand::Keepalive
-        })
-    ));
+    // `server keepalive` existed only to prewarm the daemon from the Windows
+    // hotkey listener. That saved ~0.5s (bootstrap is 385-682ms) at the cost of
+    // a resident process, so both were removed.
+    assert!(
+        Args::try_parse_from(["jcode", "server", "keepalive"]).is_err(),
+        "server keepalive was retired and should no longer parse"
+    );
 }
 
 #[test]
