@@ -365,19 +365,18 @@ fn shared_test_jcode_home() -> &'static std::path::Path {
 }
 
 fn ensure_test_jcode_home_if_unset() {
+    hold_shared_env_read_guard();
+
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
 
-    // Serialize the unset -> set transition against tests that scope their
-    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
-    // several tests hold it while calling `create_test_app` (e.g. the
-    // pinned-todo-band test), so a blocking `lock_test_env()` here would
-    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
-    // `try_lock` keeps the serialization when the lock is free and degrades
-    // to the caller's own exclusion when this thread already holds it: if
-    // try_lock fails because *we* hold the lock, no other thread can race
-    // this read-modify-write anyway.
+    // Serialize the unset -> set transition against tests that scope their own
+    // JCODE_HOME. `try_write` keeps the serialization when the lock is free and
+    // degrades to the caller's own exclusion when this thread already holds it
+    // (the guard above, or a `with_temp_jcode_home` further up the stack): if
+    // it fails because *we* hold the lock, no other thread can race this
+    // read-modify-write anyway. A blocking acquire here would self-deadlock.
     let _env_lock = crate::storage::test_env_lock().try_lock();
 
     if std::env::var_os("JCODE_HOME").is_some() {
@@ -385,6 +384,54 @@ fn ensure_test_jcode_home_if_unset() {
     }
 
     crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
+}
+
+thread_local! {
+    /// The shared-env read guard parked for the currently running test.
+    static ENV_READ_GUARD: std::cell::RefCell<Option<std::sync::RwLockReadGuard<'static, ()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keep the shared `JCODE_HOME` stable for the rest of this test.
+///
+/// `create_test_app` and friends read the ambient home and write real session,
+/// reload-context and UI-state files under it. ~800 tests do this and used to
+/// take no lock at all, so a concurrent `with_temp_jcode_home` on another
+/// thread could repoint `JCODE_HOME` mid-test: files were written into a temp
+/// dir that was then deleted, and the assertions read back nothing. That is
+/// what the `test_restore_session_*` and model-picker tests were failing on,
+/// but only under parallelism, and only sometimes.
+///
+/// The guard is a *read* guard, so these tests still run concurrently with each
+/// other; they are excluded only while a home-swapping test holds the write
+/// side. It lives in a thread-local because libtest gives each test its own
+/// thread, so parking it there scopes it to the test without changing the
+/// signature of `create_test_app` and its ~950 call sites.
+fn hold_shared_env_read_guard() {
+    ENV_READ_GUARD.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return;
+        };
+        if slot.is_some() {
+            return;
+        }
+        // `try_read`, never a blocking read: a test that already holds the
+        // write side (any `with_temp_jcode_home` caller) would otherwise
+        // deadlock against itself here. Such a test is already exclusive, so
+        // it needs no additional guard.
+        if let Ok(guard) = crate::storage::shared_test_home_lock().try_read() {
+            *slot = Some(guard);
+        }
+    });
+}
+
+/// Drop this thread's parked read guard, if it holds one.
+fn release_shared_env_read_guard() {
+    ENV_READ_GUARD.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            slot.take();
+        }
+    });
 }
 
 fn clear_persisted_test_ui_state() {
@@ -408,7 +455,19 @@ fn clear_persisted_test_ui_state() {
 }
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+    // libtest reuses a thread for several tests, so an earlier
+    // `create_test_app` on this thread may still be parking the shared read
+    // guard. Releasing it first is required: `RwLock` is not upgradable, so
+    // taking the write side while holding a read guard on the same thread
+    // deadlocks.
+    release_shared_env_read_guard();
     let _guard = crate::storage::lock_test_env();
+    // Exclude every test reading the shared `JCODE_HOME` for as long as this
+    // one has it repointed at a temp dir. `lock_test_env` above only excludes
+    // other env-mutating tests, which is why the ~800 readers used to race.
+    let _home_guard = crate::storage::shared_test_home_lock()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());

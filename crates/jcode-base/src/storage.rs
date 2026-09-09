@@ -37,5 +37,22 @@ pub fn lock_test_env() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Reader/writer lock over the *shared* test `JCODE_HOME`.
+///
+/// Separate from [`test_env_lock`], which stays a plain mutex because ~40
+/// helper signatures name its guard type. This one expresses the relationship
+/// that mutex cannot: many tests read the shared home concurrently, and a test
+/// that repoints `JCODE_HOME` at its own temp dir must exclude all of them.
+///
+/// Without it, ~800 tests that build an app against the shared home took no
+/// lock at all, so a concurrent home swap could move `JCODE_HOME` out from
+/// under them mid-test: their session and reload files were written into
+/// another test's temp dir and vanished with it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shared_test_home_lock() -> &'static std::sync::RwLock<()> {
+    static HOME_LOCK: OnceLock<std::sync::RwLock<()>> = OnceLock::new();
+    HOME_LOCK.get_or_init(|| std::sync::RwLock::new(()))
+}
+
 #[cfg(test)]
 mod tests;
