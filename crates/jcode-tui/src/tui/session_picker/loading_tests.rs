@@ -152,6 +152,16 @@ fn cached_grouped_sessions_round_trip_from_disk() {
     assert_eq!(orphans[0].title, "Cache test");
 }
 
+/// JSON-encode a path, quotes included.
+///
+/// These fixtures splice a real temp path into a hand-written JSON string.
+/// On Windows that path contains `\`, which is an escape character in JSON,
+/// so `C:\Users\...` does not merely look wrong, it fails to parse and the
+/// whole index is silently ignored. Let serde do the quoting.
+fn json_string(path: &std::path::Path) -> String {
+    serde_json::Value::from(path.to_string_lossy().as_ref()).to_string()
+}
+
 #[test]
 fn load_sessions_includes_claude_code_sessions_from_external_home() {
     let _env_lock = crate::storage::lock_test_env();
@@ -177,7 +187,7 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"claude-session-123\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Investigate the login bug\",",
                 "\"summary\":\"Investigate the login bug\",",
                 "\"messageCount\":2,",
@@ -186,7 +196,7 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            json_string(&transcript_path)
         ),
     )
     .expect("write index");
@@ -236,7 +246,7 @@ fn load_sessions_hides_external_sessions_when_opted_out() {
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"claude-session-456\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"hidden\",",
                 "\"summary\":\"hidden\",",
                 "\"messageCount\":1,",
@@ -245,7 +255,7 @@ fn load_sessions_hides_external_sessions_when_opted_out() {
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            json_string(&transcript_path)
         ),
     )
     .expect("write index");
@@ -296,14 +306,14 @@ fn load_claude_code_preview_reads_transcript_messages() {
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"claude-session-456\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Fix the flaky test\",",
                 "\"messageCount\":2,",
                 "\"created\":\"2026-04-04T12:00:00Z\",",
                 "\"modified\":\"2026-04-04T12:05:00Z\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            json_string(&transcript_path)
         ),
     )
     .expect("write index");
