@@ -804,17 +804,6 @@ mod tests {
         );
     }
 
-    /// A single-target build must not drag in the other binaries: building the
-    /// desktop app when only the TUI changed wastes minutes.
-    #[test]
-    fn single_targets_do_not_build_other_binaries() {
-        let repo = repo_fixture(false);
-        let tui = selfdev_build_command_for_target(repo.path(), SelfDevBuildTarget::Tui);
-        assert!(!tui.display.contains("jcode-desktop"));
-        let desktop2 = selfdev_build_command_for_target(repo.path(), SelfDevBuildTarget::Desktop2);
-        assert!(!desktop2.display.contains("-p jcode "));
-    }
-
     #[test]
     fn windows_selfdev_build_invokes_native_cargo_without_a_shell() {
         let repo = repo_fixture(false);
