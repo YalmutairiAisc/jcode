@@ -99,10 +99,16 @@ fn test_input_composer_drag_selects_and_copies_typed_text() {
 
     let copied = drag_copy(&mut app, start, end);
     assert_eq!(copied, "select this draft");
-    assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
-    // Selection state is cleared after the copy.
-    assert!(app.copy_selection_anchor.is_none());
-    assert!(app.copy_selection_cursor.is_none());
+    // Drag-copy keeps the highlight visible (c7afd6620) and says so.
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
+    );
+    // The selection deliberately survives the copy: drag-to-copy is
+    // browser-like, so the text stays highlighted until the next click
+    // (c7afd6620). Clearing it here made good selections look like failures.
+    assert!(app.copy_selection_anchor.is_some());
+    assert!(app.copy_selection_cursor.is_some());
 }
 
 #[test]
@@ -411,7 +417,7 @@ fn test_input_composer_drag_then_release_copies_via_full_mouse_path() {
     assert!(
         matches!(
             app.status_notice().as_deref(),
-            Some("Copied selection") | Some("Failed to copy selection")
+            Some("Copied selection · highlight remains visible") | Some("Failed to copy selection")
         ),
         "drag release over the composer must attempt a copy, got {:?}",
         app.status_notice()
