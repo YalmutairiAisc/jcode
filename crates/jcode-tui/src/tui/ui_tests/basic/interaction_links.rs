@@ -63,6 +63,10 @@ fn test_prompt_entry_animation_expires_after_window() {
 
 #[test]
 fn test_prompt_entry_bg_color_pulses_then_fades() {
+    // Without truecolor every shade quantizes into the 256-color cube, so
+    // distinct blends collapse onto one `Indexed(..)` and these inequalities
+    // are not testable. The host's `COLORTERM` decides that, so pin it.
+    jcode_tui_style::color::pin_truecolor_for_tests();
     let base = user_bg();
     let early = prompt_entry_bg_color(base, 0.15);
     let peak = prompt_entry_bg_color(base, 0.45);
@@ -75,6 +79,7 @@ fn test_prompt_entry_bg_color_pulses_then_fades() {
 
 #[test]
 fn test_prompt_entry_shimmer_color_moves_across_positions() {
+    jcode_tui_style::color::pin_truecolor_for_tests();
     let base = user_text();
     let left_early = prompt_entry_shimmer_color(base, 0.1, 0.1);
     let right_early = prompt_entry_shimmer_color(base, 0.9, 0.1);
