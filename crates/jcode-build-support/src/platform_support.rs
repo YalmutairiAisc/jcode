@@ -6,6 +6,13 @@ use std::path::Path;
 /// loaded, so the swap below can only try. Nothing retried, and the orphans
 /// accumulated indefinitely (9+ GB on a self-dev machine). Sweeping on every
 /// swap collects each one as soon as the process holding it exits.
+///
+/// Only files older than [`RENAME_ASIDE_GRACE`] are swept. A concurrent swap
+/// keeps its own aside file as the rollback source between renaming the old
+/// binary away and moving the new one into place; deleting that would leave no
+/// binary to restore if its rename failed. That window is microseconds, so the
+/// grace period rules it out while still collecting orphans, which outlive it
+/// by hours.
 #[cfg(windows)]
 fn remove_stale_rename_aside(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -14,12 +21,32 @@ fn remove_stale_rename_aside(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(".jcode-launcher-old-") || name.contains(".exe.old-") {
-            // Still-loaded binaries fail here and are retried on the next swap.
-            let _ = std::fs::remove_file(entry.path());
+        if !(name.starts_with(".jcode-launcher-old-") || name.contains(".exe.old-")) {
+            continue;
         }
+        let recent = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| {
+                std::time::SystemTime::now()
+                    .duration_since(modified)
+                    .map_err(|_| std::io::Error::other("modified in the future"))
+            })
+            .map(|age| age < RENAME_ASIDE_GRACE)
+            // A file whose age cannot be read is left alone rather than risked.
+            .unwrap_or(true);
+        if recent {
+            continue;
+        }
+        // Still-loaded binaries fail here and are retried on the next swap.
+        let _ = std::fs::remove_file(entry.path());
     }
 }
+
+/// How long a rename-aside file is protected from the sweep. Far longer than a
+/// swap's rollback window, far shorter than an orphan's lifetime.
+#[cfg(windows)]
+const RENAME_ASIDE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Set file permissions to owner read/write/execute (0o755).
 /// No-op on Windows (executability is determined by file extension).
@@ -110,6 +137,17 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
 mod tests {
     use super::atomic_symlink_swap;
 
+    /// Age a file past the sweep's grace period, standing in for an orphan
+    /// left by an earlier run.
+    fn backdate(path: &std::path::Path) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for backdating");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        file.set_modified(old).expect("backdate mtime");
+    }
+
     #[test]
     fn windows_swap_replaces_existing_launcher_via_staged_file() {
         let dir = tempfile::tempdir().expect("temporary directory");
@@ -147,6 +185,10 @@ mod tests {
         for path in [&launcher_orphan, &rotated_orphan, &unrelated] {
             std::fs::write(path, b"stale").expect("orphan");
         }
+        // Orphans are only swept once past the in-flight grace period.
+        for path in [&launcher_orphan, &rotated_orphan] {
+            backdate(path);
+        }
 
         atomic_symlink_swap(&src, &dst, &temp).expect("swap succeeds");
 
@@ -154,5 +196,33 @@ mod tests {
         assert!(!rotated_orphan.exists(), "rotated orphan should be swept");
         assert!(unrelated.exists(), "unrelated files must survive the sweep");
         assert_eq!(std::fs::read(&dst).expect("new launcher"), b"new binary");
+    }
+
+    #[test]
+    fn windows_swap_leaves_a_concurrent_swaps_rollback_file_alone() {
+        // Between renaming the old binary aside and moving the new one in, a
+        // concurrent swap needs its aside file as the rollback source. Sweeping
+        // it would strand that swap with no binary to restore.
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let src = dir.path().join("source.exe");
+        let dst = dir.path().join("jcode.exe");
+        let temp = dir.path().join(".jcode-current");
+        std::fs::write(&src, b"new binary").expect("source");
+        std::fs::write(&dst, b"old binary").expect("destination");
+
+        // Just written, so it stands in for an in-flight operation.
+        let in_flight = dir.path().join(".jcode-launcher-old-4242-9999.exe");
+        std::fs::write(&in_flight, b"rollback source").expect("in-flight aside");
+
+        atomic_symlink_swap(&src, &dst, &temp).expect("swap succeeds");
+
+        assert!(
+            in_flight.exists(),
+            "a fresh aside file belongs to an in-flight swap and must survive"
+        );
+        assert_eq!(
+            std::fs::read(&in_flight).expect("rollback source"),
+            b"rollback source"
+        );
     }
 }
