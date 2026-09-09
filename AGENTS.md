@@ -80,3 +80,42 @@ one lock while blocking on the other looks identical to a thread that owns
 nothing. "No thread holds either lock" is what an A-then-B/B-then-A cycle looks
 like, not evidence of a leaked guard. Match each blocked test against the order
 it takes the two locks.
+
+## Known: the suite is not isolated under parallelism
+
+`--test-threads=1` is green (2270 passed / 0 failed). At the default thread
+count, 3-7 tests fail per run and **the set changes every run**. They pass
+individually and serially. This is test isolation, not product behavior.
+
+The cause is that env vars are process-global while ~800 tests read them
+concurrently. `lock_test_env` only excludes other env-*mutating* tests, so a
+test that perturbs the environment is invisible to every reader:
+
+- `JCODE_HOME` moves where session and reload-context files are written, so
+  `test_restore_session_*` writes into another test's temp dir
+- `JCODE_SSH_REMOTE` makes `parse_dropped_paths` return `None`, so the
+  drag-and-drop tests fail inside product code that never mentions the
+  environment
+
+`JCODE_HOME` alone is set at 75 sites across 21 files, only three of which go
+through `with_temp_jcode_home`.
+
+### What does not work
+
+An `RwLock` with readers parked in a thread-local. It is the right *shape*
+(readers do not exclude each other, writers exclude everyone) and it fixes the
+isolated repro, 13/20 runs to 20/20. It deadlocks the full suite.
+
+The flaw is that a parked guard has no scoped owner. libtest threads outlive
+the tests that ran on them, so a read guard parked by `create_test_app` stays
+held after that test finishes. A later writer blocks on it *while holding the
+env mutex*, and every other test then piles up behind that mutex. Releasing the
+guard in `lock_test_env` is not enough, since the blocking writer may be on a
+different thread than the one still parking a guard. Using `try_read` instead
+avoids the deadlock but silently declines the guard exactly when a writer holds
+the lock, which is the only moment it was needed.
+
+A working fix needs the read guard to be scoped to the test, which means
+returning it to the test body rather than parking it. `create_test_app` returns
+`App`, so that is a signature change across ~950 call sites, or a new
+`create_test_app_guarded` adopted by the tests that need it.
