@@ -853,56 +853,6 @@ mod utf8_truncation_tests {
         assert!(output.starts_with(&"a".repeat(29_999)));
     }
 
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn build_shell_command_uses_cmd_and_executes_command() {
-        let output = build_shell_command("echo hello-from-cmd")
-            .output()
-            .await
-            .expect("run cmd command");
-        assert!(output.status.success(), "cmd command should succeed");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.to_ascii_lowercase().contains("hello-from-cmd"),
-            "unexpected stdout: {}",
-            stdout
-        );
-
-        let probe_path = std::env::temp_dir().join(format!(
-            "jcode-cmd-quoting-probe-{}.cmd",
-            std::process::id()
-        ));
-        std::fs::write(
-            &probe_path,
-            concat!(
-                "@echo off\r\n",
-                "if \"%~1\"==\"text with spaces\" if \"%~2\"==\"\" (\r\n",
-                "  echo quoted-argument-ok\r\n",
-                "  exit /b 0\r\n",
-                ")\r\n",
-                "echo first=[%~1] second=[%~2]\r\n",
-                "exit /b 1\r\n",
-            ),
-        )
-        .expect("write cmd quoting probe");
-
-        let quoted_command = format!("call \"{}\" \"text with spaces\"", probe_path.display());
-        let quoted_output = build_shell_command(&quoted_command)
-            .output()
-            .await
-            .expect("run cmd quoting probe");
-        let _ = std::fs::remove_file(&probe_path);
-        let quoted_stdout = String::from_utf8_lossy(&quoted_output.stdout);
-        let quoted_stderr = String::from_utf8_lossy(&quoted_output.stderr);
-        assert!(
-            quoted_output.status.success(),
-            "quoted argument should remain one child-process argument; stdout={quoted_stdout:?} stderr={quoted_stderr:?}"
-        );
-        assert!(
-            quoted_stdout.contains("quoted-argument-ok"),
-            "unexpected quoted-command stdout: {quoted_stdout}"
-        );
-    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -1020,6 +970,68 @@ mod windows_posix_shell_tests {
             .iter()
             .copied()
             .find(|p| std::path::Path::new(p).is_file())
+    }
+
+    /// cmd.exe quoting for `cmd.exe /D /S /C`. Must force cmd.exe: a machine
+    /// with `terminal.windows_shell` configured resolves `build_shell_command`
+    /// to git-bash, where `call "..."` is not a command at all.
+    #[tokio::test]
+    async fn build_shell_command_uses_cmd_and_executes_command() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _config = IsolatedConfig::new();
+        let previous = std::env::var(WINDOWS_SHELL_ENV).ok();
+        set_env(Some("cmd"));
+        run_cmd_quoting_probe().await;
+        set_env(previous.as_deref());
+    }
+
+    async fn run_cmd_quoting_probe() {
+        let output = build_shell_command("echo hello-from-cmd")
+            .output()
+            .await
+            .expect("run cmd command");
+        assert!(output.status.success(), "cmd command should succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.to_ascii_lowercase().contains("hello-from-cmd"),
+            "unexpected stdout: {}",
+            stdout
+        );
+
+        let probe_path = std::env::temp_dir().join(format!(
+            "jcode-cmd-quoting-probe-{}.cmd",
+            std::process::id()
+        ));
+        std::fs::write(
+            &probe_path,
+            concat!(
+                "@echo off\r\n",
+                "if \"%~1\"==\"text with spaces\" if \"%~2\"==\"\" (\r\n",
+                "  echo quoted-argument-ok\r\n",
+                "  exit /b 0\r\n",
+                ")\r\n",
+                "echo first=[%~1] second=[%~2]\r\n",
+                "exit /b 1\r\n",
+            ),
+        )
+        .expect("write cmd quoting probe");
+
+        let quoted_command = format!("call \"{}\" \"text with spaces\"", probe_path.display());
+        let quoted_output = build_shell_command(&quoted_command)
+            .output()
+            .await
+            .expect("run cmd quoting probe");
+        let _ = std::fs::remove_file(&probe_path);
+        let quoted_stdout = String::from_utf8_lossy(&quoted_output.stdout);
+        let quoted_stderr = String::from_utf8_lossy(&quoted_output.stderr);
+        assert!(
+            quoted_output.status.success(),
+            "quoted argument should remain one child-process argument; stdout={quoted_stdout:?} stderr={quoted_stderr:?}"
+        );
+        assert!(
+            quoted_stdout.contains("quoted-argument-ok"),
+            "unexpected quoted-command stdout: {quoted_stdout}"
+        );
     }
 
     #[test]

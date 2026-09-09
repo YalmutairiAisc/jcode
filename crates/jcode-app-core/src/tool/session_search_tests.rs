@@ -311,6 +311,9 @@ fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
     with_temp_home(|home| {
         let mut session = Session::create_with_id("system-session".to_string(), None, None);
         session.working_dir = Some("/tmp/project".to_string());
+        // `save()` skips sessions with no visible conversation message, and
+        // system reminders/display-role messages do not count as visible.
+        session.add_message(Role::User, vec![text("ordinary visible prompt")]);
         session.add_message(
             Role::User,
             vec![text(

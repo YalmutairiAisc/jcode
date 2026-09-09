@@ -371,6 +371,24 @@ impl Session {
         Ok(session)
     }
 
+    /// State that only exists because something explicitly configured or wrote
+    /// to this session: a model/provider/route pin, a reasoning effort, a
+    /// canary/testing marker, or a recorded replay/memory event. A spawned
+    /// headed session and a swarm coordinator both carry exactly this and no
+    /// visible message yet, so treating them as "untouched" silently discarded
+    /// the pin and the swarm timeline before anything could read them back.
+    fn has_explicit_startup_configuration(&self) -> bool {
+        self.model.is_some()
+            || self.provider_key.is_some()
+            || self.route_api_method.is_some()
+            || self.reasoning_effort.is_some()
+            || self.subagent_model.is_some()
+            || self.is_canary
+            || self.testing_build.is_some()
+            || !self.replay_events.is_empty()
+            || !self.memory_injections.is_empty()
+    }
+
     pub fn save(&mut self) -> Result<()> {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
@@ -396,6 +414,7 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            && !self.has_explicit_startup_configuration()
         {
             return Ok(());
         }

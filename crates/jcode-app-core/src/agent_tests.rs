@@ -1034,6 +1034,15 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
+    // `save()` deliberately skips sessions that have no visible conversation
+    // and no explicit configuration, so a restorable fixture needs a message.
+    restored_session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "restore me".to_string(),
+            cache_control: None,
+        }],
+    );
     restored_session.save().expect("save restored session");
 
     seed_transient_session_state(&mut agent);
@@ -1107,6 +1116,13 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         "session_restore_memory_dedup".to_string(),
         None,
         None,
+    );
+    restored_session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "restore me".to_string(),
+            cache_control: None,
+        }],
     );
     restored_session.record_memory_injection(
         "🧠 auto-recalled 1 memory".to_string(),

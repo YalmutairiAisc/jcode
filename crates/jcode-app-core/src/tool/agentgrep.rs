@@ -450,6 +450,17 @@ fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<Strin
         .map(|name| name.to_string_lossy().into_owned())
 }
 
+/// Match a result path against the single file the search was scoped to.
+/// Result paths are relative to the search root and may carry a leading
+/// `./` or, on Windows, `.\` and backslash separators, so a bare `==`
+/// against the file name silently dropped every match.
+fn path_is_exact_file(result_path: &str, exact_file: &str) -> bool {
+    result_path
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name == exact_file)
+}
+
 fn filter_grep_result_to_exact_file(
     mut result: GrepResult,
     exact_file: Option<&str>,
@@ -458,7 +469,7 @@ fn filter_grep_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result.files.retain(|file| path_is_exact_file(&file.path, exact_file));
     result.total_files = result.files.len();
     result.total_matches = result.files.iter().map(|file| file.matches.len()).sum();
     result
@@ -472,7 +483,7 @@ fn filter_find_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result.files.retain(|file| path_is_exact_file(&file.path, exact_file));
     result
 }
 
@@ -484,7 +495,7 @@ fn filter_smart_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result.files.retain(|file| path_is_exact_file(&file.path, exact_file));
     result.summary.total_files = result.files.len();
     result.summary.total_regions = result.files.iter().map(|file| file.regions.len()).sum();
     result.summary.best_file = result.files.first().map(|file| file.path.clone());
