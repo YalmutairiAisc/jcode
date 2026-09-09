@@ -1362,9 +1362,19 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
 
     assert!(rendered.contains("✓ todo"), "{rendered}");
     assert!(rendered.contains("pelican-bike"), "{rendered}");
+    // The inline card keeps the intent on one ellipsized line, which
+    // `render_todos_message_shows_user_intention_when_understanding_is_unclear`
+    // asserts directly. This objective is 260 characters, so at any realistic
+    // width it is shortened by design; the full text stays in the todo payload
+    // and the side panel. Assert the line is present and leads with the
+    // objective rather than demanding a ~274-column terminal.
+    let intent_line = rendered
+        .lines()
+        .find(|line| line.contains("Intent clear:"))
+        .unwrap_or_else(|| panic!("intent line missing:\n{rendered}"));
     assert!(
-        compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo plan intention was truncated:\n{rendered}"
+        intent_line.contains(&OBJECTIVE[..40]),
+        "intent line should start with the objective: {intent_line}"
     );
     // Compact transcript cards show the goal's quality assessments rather than
     // repeating its potentially long feedback-loop prose. The full prose remains
