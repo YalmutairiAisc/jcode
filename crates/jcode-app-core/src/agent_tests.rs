@@ -1281,7 +1281,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
-    agent.session.save().expect("save active session");
+    agent.session.save_explicit().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
         Vec::new(),

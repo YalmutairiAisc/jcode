@@ -59,6 +59,9 @@ pub(super) enum PersistVectorMode {
 #[derive(Debug, Clone, Default)]
 pub(super) struct SessionPersistState {
     pub(super) snapshot_exists: bool,
+    /// Sticky opt-out of the lazy-save guard, set by `Session::save_explicit`
+    /// for sessions whose id is handed out before their first message.
+    pub(super) force_persist: bool,
     pub(super) messages_len: usize,
     pub(super) env_snapshots_len: usize,
     pub(super) memory_injections_len: usize,

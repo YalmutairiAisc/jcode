@@ -371,22 +371,32 @@ impl Session {
         Ok(session)
     }
 
-    /// State that only exists because something explicitly configured or wrote
-    /// to this session: a model/provider/route pin, a reasoning effort, a
-    /// canary/testing marker, or a recorded replay/memory event. A spawned
-    /// headed session and a swarm coordinator both carry exactly this and no
-    /// visible message yet, so treating them as "untouched" silently discarded
-    /// the pin and the swarm timeline before anything could read them back.
-    fn has_explicit_startup_configuration(&self) -> bool {
-        self.model.is_some()
-            || self.provider_key.is_some()
-            || self.route_api_method.is_some()
-            || self.reasoning_effort.is_some()
-            || self.subagent_model.is_some()
-            || self.is_canary
+    /// State that exists only because something explicitly wrote to this
+    /// session: a recorded replay event or memory injection, or a canary
+    /// marker. A swarm coordinator carries exactly this and no visible
+    /// message, so treating it as "untouched" discarded its timeline.
+    ///
+    /// Deliberately excludes `model`/`provider_key`/`reasoning_effort`:
+    /// `Agent::new` fills those in for every session from the current
+    /// provider, so they do not distinguish an explicit pin from a default.
+    /// A caller that needs an empty configured session on disk should call
+    /// [`Session::save_explicit`].
+    fn has_explicit_session_state(&self) -> bool {
+        self.is_canary
             || self.testing_build.is_some()
             || !self.replay_events.is_empty()
             || !self.memory_injections.is_empty()
+    }
+
+    /// Persist even when the session has no visible conversation yet.
+    ///
+    /// For sessions whose id is handed to someone else before the first
+    /// message: a spawned headed client is launched with `--session <id>` and
+    /// must be able to load the model/provider/effort chosen for it, so the
+    /// lazy-save guard in [`Session::save`] would silently drop that pin.
+    pub fn save_explicit(&mut self) -> Result<()> {
+        self.persist_state.force_persist = true;
+        self.save()
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -414,7 +424,8 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
-            && !self.has_explicit_startup_configuration()
+            && !self.persist_state.force_persist
+            && !self.has_explicit_session_state()
         {
             return Ok(());
         }

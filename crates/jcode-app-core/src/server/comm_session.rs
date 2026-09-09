@@ -99,7 +99,10 @@ fn create_visible_spawn_session(
     if selfdev_requested {
         session.set_canary("self-dev");
     }
-    session.save()?;
+    // The headed client is launched with this id and reads the model,
+    // provider and effort chosen above back off disk, so this must persist
+    // before the session has any conversation message.
+    session.save_explicit()?;
 
     Ok((session.id.clone(), cwd))
 }

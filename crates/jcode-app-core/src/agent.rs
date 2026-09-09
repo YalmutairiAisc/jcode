@@ -615,6 +615,19 @@ impl Agent {
         (message, persist)
     }
 
+    /// Persist a deliberate user choice (model, route) even on a session that
+    /// has no conversation yet. `save` skips those, which silently dropped a
+    /// model picked before the first message; the next restore reverted to the
+    /// provider default.
+    fn persist_session_choice_best_effort(&mut self, context: &str) {
+        if let Err(err) = self.session.save_explicit() {
+            logging::warn(&format!(
+                "Failed to persist {} for session {}: {}",
+                context, self.session.id, err
+            ));
+        }
+    }
+
     fn persist_session_best_effort(&mut self, context: &str) {
         if let Err(err) = self.session.save() {
             logging::warn(&format!(

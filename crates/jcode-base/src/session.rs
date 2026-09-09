@@ -522,6 +522,9 @@ impl Session {
     fn reset_persist_state(&mut self, snapshot_exists: bool) {
         self.persist_state = SessionPersistState {
             snapshot_exists,
+            // Cleared deliberately: once a snapshot exists the lazy-save guard
+            // no longer applies, so the override has nothing left to override.
+            force_persist: false,
             messages_len: self.messages.len(),
             env_snapshots_len: self.env_snapshots.len(),
             memory_injections_len: self.memory_injections.len(),
