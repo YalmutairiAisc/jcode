@@ -166,7 +166,10 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     let client_count = Arc::new(RwLock::new(1usize));
 
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
-    let (_reader_a, writer_a) = stream_a.into_split();
+    // Keep the read half named: `tokio::io::split` leaves both halves owning the
+    // same stream, so dropping only the writer does not close it. On Windows the
+    // named pipe then never signals EOF and `read_to_end` below blocks forever.
+    let (reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
     handle_get_history(
@@ -188,6 +191,7 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
 
     drop(busy_guard);
     drop(writer);
+    drop(reader_a);
 
     let mut bytes = Vec::new();
     stream_b
@@ -270,7 +274,10 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
-    let (_reader_a, writer_a) = stream_a.into_split();
+    // Keep the read half named: `tokio::io::split` leaves both halves owning the
+    // same stream, so dropping only the writer does not close it. On Windows the
+    // named pipe then never signals EOF and `read_to_end` below blocks forever.
+    let (reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
     tokio::time::timeout(
@@ -283,6 +290,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
 
     drop(busy_guard);
     drop(writer);
+    drop(reader_a);
 
     let mut bytes = Vec::new();
     stream_b
