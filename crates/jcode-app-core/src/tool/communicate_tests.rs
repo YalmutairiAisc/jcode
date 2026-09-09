@@ -1655,9 +1655,13 @@ async fn wait_for_member_status(
         }
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "timed out waiting for member {} to reach status {}",
+                "timed out waiting for member {} to reach status {} (saw: {:?})",
                 target_session,
-                expected_status
+                expected_status,
+                members
+                    .iter()
+                    .map(|m| (m.session_id.clone(), m.status.clone(), m.detail.clone()))
+                    .collect::<Vec<_>>()
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
