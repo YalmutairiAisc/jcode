@@ -36,7 +36,7 @@ const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
 #[cfg(windows)]
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+    "Run a Windows cmd.exe command (tool name `bash`). Use cmd.exe syntax, not Bash.";
 
 /// Opt-in: run the `bash` tool through a real POSIX shell on Windows.
 ///
@@ -66,8 +66,7 @@ const WINDOWS_SHELL_ENV: &str = "JCODE_WINDOWS_SHELL";
 
 #[cfg(windows)]
 const WINDOWS_POSIX_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a bash command (git-bash on Windows). Use Bash syntax: pipes, &&, single quotes and \
-     unix tools all work.";
+    "Run a bash command (git-bash on Windows). Pipes, &&, quotes and unix tools work.";
 
 /// Usual git-bash locations, in the order a Windows install puts them.
 #[cfg(windows)]
@@ -841,7 +840,7 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
 
 #[cfg(test)]
 mod utf8_truncation_tests {
-    #[cfg(any(windows, unix))]
+    #[cfg(unix)]
     use super::build_shell_command;
     use super::format_command_output;
 
@@ -1267,8 +1266,8 @@ mod windows_posix_shell_tests {
         if installed_git_bash().is_some() {
             with_env(Some("auto"), || {
                 let d = tool.description();
-                assert!(d.contains("Bash syntax"), "unexpected description: {d}");
-                assert!(!d.contains("Use cmd.exe syntax"), "stale cmd.exe guidance: {d}");
+                assert!(d.contains("git-bash"), "unexpected description: {d}");
+                assert!(!d.contains("cmd.exe"), "stale cmd.exe guidance: {d}");
             });
         }
     }

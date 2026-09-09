@@ -144,8 +144,10 @@ pub fn reload_process_alive(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        // Assuming "alive" on Windows made a crashed reload look like one that
+        // is still starting, so `inspect_reload_wait_status` never reported
+        // Failed and the caller waited out the whole timeout instead.
+        crate::platform::is_process_running(pid)
     }
 }
 
@@ -741,15 +743,15 @@ mod tests {
     /// dead at the moment of selection. Retries guard against the (extremely
     /// rare) case where the kernel immediately recycles the pid for another
     /// test thread's process.
-    #[cfg(unix)]
     fn spawn_and_reap_dead_pid() -> u32 {
         use std::process::Command;
         for _ in 0..16 {
-            let mut child = Command::new("/bin/sh")
-                .arg("-c")
-                .arg("exit 0")
-                .spawn()
-                .expect("spawn short-lived child");
+            let mut child = if cfg!(windows) {
+                Command::new("cmd.exe").args(["/D", "/C", "exit 0"]).spawn()
+            } else {
+                Command::new("/bin/sh").arg("-c").arg("exit 0").spawn()
+            }
+            .expect("spawn short-lived child");
             let pid = child.id();
             let _ = child.wait();
             if !reload_process_alive(pid) {
@@ -916,7 +918,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn reload_process_alive_handles_zero_and_dead_pids() {
         assert!(!reload_process_alive(0), "pid 0 is never a live reload pid");

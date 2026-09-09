@@ -74,9 +74,16 @@ fn rate_limit_backoff(
             .map(Duration::from_secs)
             .or_else(|| {
                 // checked_add: a garbage reset header must not panic here.
-                let reset_at =
-                    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(reset_epoch_secs?))?;
-                reset_at.duration_since(now).ok()
+                let reset_epoch = reset_epoch_secs?;
+                match SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(reset_epoch)) {
+                    Some(reset_at) => reset_at.duration_since(now).ok(),
+                    // A reset instant that far out is not representable on
+                    // every platform (Windows `SystemTime` is a FILETIME with
+                    // a much smaller range than Unix). It is a bogus header
+                    // either way, so clamp it rather than treating it as "no
+                    // hint" and backing off for the shorter fallback window.
+                    None => Some(RATE_LIMIT_BACKOFF_MAX),
+                }
             })
             .filter(|backoff| !backoff.is_zero())
             .unwrap_or(RATE_LIMIT_BACKOFF_FALLBACK)
