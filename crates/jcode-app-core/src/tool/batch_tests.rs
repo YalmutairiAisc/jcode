@@ -122,12 +122,18 @@ async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
     );
 }
 
+/// The worked JSON example used to live in the tool description, which is
+/// always-on prompt cost for every request and blew the ~20-token cap at ~130
+/// tokens. The shape is now described on the `tool_calls` schema instead.
 #[test]
-fn description_includes_parallel_tool_call_example() {
+fn description_states_parallelism_and_schema_states_the_shape() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool_calls": ["#));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool": "read""#));
-    assert!(BATCH_DESCRIPTION.contains(r#""tool": "agentgrep""#));
+    let tool_calls = generic_batch_schema()["properties"]["tool_calls"].clone();
+    let description = tool_calls["description"]
+        .as_str()
+        .expect("tool_calls should describe its own shape");
+    assert!(description.contains("`tool`"));
+    assert!(description.contains("`intent`"));
 }
 
 #[test]
@@ -282,7 +288,9 @@ fn test_schema_only_requires_tool() {
 fn test_schema_keeps_flat_generic_subcall_shape() {
     let schema = generic_batch_schema();
 
-    assert!(schema["properties"]["tool_calls"]["description"].is_null());
+    // `tool_calls` carries the call-shape description (moved off the tool
+    // description, which is always-on prompt cost); its `items` must not.
+    assert!(schema["properties"]["tool_calls"]["description"].is_string());
     assert!(schema["properties"]["tool_calls"]["items"]["description"].is_null());
     assert_eq!(
         schema["properties"]["tool_calls"]["items"]["properties"]

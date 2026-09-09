@@ -687,6 +687,15 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // The todo quality-gate enums are per-value calibration rubrics: the model
+    // has to pick one label correctly at schema-fill time, and a truncated
+    // rubric produces a wrong label rather than a cheaper one. The wording is
+    // the definition of the enum, so it is exempt rather than trimmed.
+    const EXEMPT_PARAM_PATHS: &[&str] = &[
+        "todo $.properties.goals.items.properties.feedback_loop_relevance",
+        "todo $.properties.goals.items.properties.feedback_loop_coverage",
+        "todo $.properties.goals.items.properties.feedback_loop_traceability",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -696,7 +705,10 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
             let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+            let exempt = EXEMPT_PARAM_PATHS
+                .iter()
+                .any(|entry| *entry == format!("{} {}", def.name, path));
+            if tokens > PARAM_DESCRIPTION_TOKEN_CAP && !exempt {
                 over_cap.push(format!(
                     "{} {} (~{} tokens): {}",
                     def.name, path, tokens, description

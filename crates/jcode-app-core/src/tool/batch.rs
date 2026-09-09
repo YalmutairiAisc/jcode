@@ -9,28 +9,14 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instead of making them sequentially. Example:
-{
-  "intent": "Inspect the relevant files in parallel",
-  "tool_calls": [
-    {
-      "tool": "read",
-      "intent": "Read the configuration",
-      "file_path": "src/config.rs",
-      "start_line": 1,
-      "limit": 200
-    },
-    {
-      "tool": "agentgrep",
-      "intent": "Find configuration usage",
-      "query": "Config",
-      "path": "src",
-      "glob": "**/*.rs",
-      "max_files": 20,
-      "max_regions": 20
-    }
-  ]
-}"#;
+const BATCH_DESCRIPTION: &str =
+    "Run independent tool calls in parallel instead of sequentially.";
+
+/// `tool_calls` guidance. Kept short because both tool descriptions (~20
+/// tokens) and parameter descriptions (~25) are always-on prompt cost; the
+/// worked example moved to the docs rather than every request.
+const BATCH_TOOL_CALLS_DESCRIPTION: &str =
+    "One entry per call: `tool`, `intent`, plus that tool's own parameters inline.";
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
@@ -40,6 +26,7 @@ pub(crate) fn generic_batch_schema() -> Value {
             "intent": super::intent_schema_property(),
             "tool_calls": {
                 "type": "array",
+                "description": BATCH_TOOL_CALLS_DESCRIPTION,
                 "items": {
                     "type": "object",
                     "required": ["tool", "intent"],

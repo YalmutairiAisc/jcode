@@ -1093,13 +1093,13 @@ mod tests {
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
         // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
+        // into deferred turn-finish continuation messages, and those were then
+        // compacted to one line. Assert the surviving contract: name the gate,
+        // steer away from asking the user, and require a todo update.
         for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
+            "intent",
+            "avoid asking the user",
+            "todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
@@ -1123,10 +1123,11 @@ mod tests {
             feedback_description_lower.contains("explicit observation or check"),
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
+        // Compacted to one line alongside the intent gate; assert only the
+        // surviving contract, not the retired rubric wording.
         for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
+            "feedback loop",
+            "todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
