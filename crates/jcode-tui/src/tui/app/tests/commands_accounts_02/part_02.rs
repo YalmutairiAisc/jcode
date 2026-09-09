@@ -2,6 +2,18 @@
 fn test_improve_mode_persists_in_session_file() {
     with_temp_jcode_home(|| {
         let mut session = crate::session::Session::create(None, None);
+        // `save` deliberately writes nothing for a session that has no visible
+        // message, no title, and no parent, so that opening a panel does not
+        // leave a transcript on disk. `/improve` is only reachable after a real
+        // conversation, so give this one a message or it asserts against a file
+        // that was correctly never created.
+        session.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "improve this".to_string(),
+                cache_control: None,
+            }],
+        );
         session.improve_mode = Some(crate::session::SessionImproveMode::ImprovePlan);
         let session_id = session.id.clone();
         session.save().expect("save session");
