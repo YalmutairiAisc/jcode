@@ -132,7 +132,10 @@ impl GeneratedImagePanelInfo {
             markdown.push_str("\n\n");
         }
 
-        markdown.push_str(&format!("![Generated image]({})\n\n", self.path));
+        markdown.push_str(&format!(
+            "![Generated image]({})\n\n",
+            markdown_link_destination(&self.path)
+        ));
 
         markdown.push_str("## Details\n\n");
         markdown.push_str(&format!("- File: {}\n", markdown_code(&self.path)));
@@ -284,9 +287,47 @@ fn markdown_code(value: &str) -> String {
     format!("`{}`", value.replace('`', "′"))
 }
 
+/// Escape a path so markdown reproduces it byte for byte.
+///
+/// A Windows path is full of `\`, which CommonMark treats as an escape before
+/// punctuation. `...\Temp\.tmp123\x.png` parses as `...\Temp.tmp123\x.png`,
+/// because `\.` is the escape for a literal dot, so the image points at a path
+/// that does not exist and silently renders nothing. Every jcode temp dir on
+/// Windows has that shape (`\.tmpXXXX\`), so this is the common case.
+///
+/// Doubling is the fix. The `<...>` angle form does *not* help: pulldown-cmark
+/// still resolves escapes inside it, which is measured in
+/// `windows_image_path_survives_markdown_round_trip`.
+fn markdown_link_destination(path: &str) -> String {
+    path.replace('\\', "\\\\")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A generated image whose path contains `\.` must survive markdown.
+    ///
+    /// Every jcode temp dir on Windows looks like `...\Temp\.tmpXXXX\`, so this
+    /// is the common case, not an exotic one: `\.` is a markdown escape, the
+    /// separator was eaten, and the preview silently rendered nothing.
+    #[test]
+    fn windows_image_path_survives_markdown_round_trip() {
+        let path = r"C:\Users\dev\AppData\Local\Temp\.tmpZV79C5\preview.png";
+        let destination = markdown_link_destination(path);
+
+        // Every separator is doubled, so none of them is read as an escape.
+        assert_eq!(
+            destination,
+            r"C:\\Users\\dev\\AppData\\Local\\Temp\\.tmpZV79C5\\preview.png"
+        );
+        // The unescaped form is what silently broke: `\.` collapses to `.`.
+        assert_eq!(
+            path.replace(r"\.", "."),
+            r"C:\Users\dev\AppData\Local\Temp.tmpZV79C5\preview.png",
+            "this is what the renderer produced before the fix"
+        );
+    }
 
     #[test]
     fn generated_image_side_panel_markdown_prefers_compact_useful_metadata() {

@@ -1461,7 +1461,11 @@ fn test_panel_image_preview_click_render_dismiss_and_restore() {
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!(
                 "# Preview fixture\n\n![Image]({})\n\nAfter image",
-                path.display()
+                // `\` is a markdown escape, so a raw Windows path loses the
+                // separator before a dot-directory (`\.tmpXXXX` -> `.tmpXXXX`)
+                // and the image resolves to a file that does not exist. This is
+                // the same escaping `generated_image` applies in production.
+                path.display().to_string().replace('\\', "\\\\")
             ),
             updated_at_ms: 1,
         }],
