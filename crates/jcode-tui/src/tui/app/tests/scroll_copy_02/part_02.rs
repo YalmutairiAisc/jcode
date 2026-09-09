@@ -83,8 +83,12 @@ fn test_expand_badge_shortcut_toggles_inline_diff_and_pulses_key() {
 
 #[test]
 fn test_alt_shift_i_toggles_inline_images_and_persists() {
-    let _render_lock = scroll_render_test_lock();
+    // Env lock first, then render. `create_test_app` takes the render lock
+    // internally, so a test holding render and then reaching for env deadlocks
+    // against the (six) tests that take env and then build an app. One global
+    // order, env -> render, is what keeps the suite runnable in parallel.
     let _env_guard = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());

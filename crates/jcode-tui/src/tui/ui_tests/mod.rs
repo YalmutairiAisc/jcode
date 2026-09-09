@@ -8,6 +8,109 @@ fn viewport_snapshot_test_lock() -> crate::tui::ui::RenderStateTestGuard {
     crate::tui::ui::render_state_test_lock()
 }
 
+/// Both process-global test locks must always be taken env -> render.
+///
+/// `create_test_app` takes the render lock internally, so a test that holds
+/// render and then reaches for env deadlocks against any test that holds env
+/// and then builds an app. Two tests had that inversion and wedged the whole
+/// suite at any thread count above 2 on Windows, which silently hid every
+/// test after the wedge.
+///
+/// A source scan, not runtime detection: the deadlock is timing-dependent
+/// (it took ~5 runs of the isolated pair to reproduce), so only the static
+/// property is reliably checkable. Helpers that take the env lock internally
+/// count as env acquisitions, which is how the second offender hid.
+#[test]
+fn test_locks_are_always_taken_env_before_render() {
+    /// Helpers whose body takes `lock_test_env()` before running the closure.
+    const ENV_HELPERS: &[&str] = &[
+        "lock_test_env()",
+        "with_temp_jcode_home(",
+        "with_reasoning_current_home(",
+        "with_ssh_remote_test_home(",
+    ];
+    const RENDER_LOCKS: &[&str] = &[
+        "render_state_test_lock()",
+        "viewport_snapshot_test_lock()",
+        "scroll_render_test_lock()",
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    let mut stack = vec![root];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // This test names both lock families in its own source.
+            if text.contains("fn test_locks_are_always_taken_env_before_render") {
+                continue;
+            }
+
+            let mut current_fn = String::from("<file scope>");
+            let mut render_at: Option<usize> = None;
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("fn ") {
+                    current_fn = rest.split('(').next().unwrap_or(rest).to_string();
+                    render_at = None;
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                // A helper *definition* takes the lock for its callers, not in
+                // the caller's order; only count acquisitions in a test body.
+                let is_definition = trimmed.starts_with("fn ") || trimmed.starts_with("pub");
+                if is_definition {
+                    continue;
+                }
+
+                if render_at.is_none()
+                    && trimmed.starts_with("let ")
+                    && RENDER_LOCKS.iter().any(|l| trimmed.contains(l))
+                {
+                    render_at = Some(idx + 1);
+                    continue;
+                }
+                if let Some(render_line) = render_at
+                    && ENV_HELPERS.iter().any(|h| trimmed.contains(h))
+                {
+                    offenders.push(format!(
+                        "  {}:{} in `{current_fn}`: render lock at line {render_line}, \
+                         then env via `{}`",
+                        path.display(),
+                        idx + 1,
+                        trimmed.trim_end_matches(" {"),
+                    ));
+                    render_at = None;
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "lock-order inversion: these take the render lock before the env lock, \
+         which deadlocks the whole suite under parallelism. Take \
+         `lock_test_env()` first, or drop the explicit render lock when \
+         `create_test_app` already takes it:\n{}",
+        offenders.join("\n"),
+    );
+}
+
 #[test]
 fn parse_changelog_from_supports_timestamped_entries() {
     let changelog = concat!(

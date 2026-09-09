@@ -43,37 +43,40 @@ Two things that waste time otherwise:
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
 
-## Running the test suite on Windows
+## The two test locks: always env, then render
 
-`cargo test -p jcode-tui --lib` deadlocks on Windows at the default thread count.
-Use a low one:
+`jcode-tui` tests serialize on two process-global mutexes:
+
+- `jcode_base::storage::lock_test_env()` guards `JCODE_HOME` and other env vars
+- `jcode_tui::tui::ui::render_state_test_lock()` guards global render state
+
+**Always take env first.** `create_test_app` takes the render lock internally, so
+a test that holds render and *then* reaches for env deadlocks against the many
+tests that hold env and then build an app. Neither lock is reentrant.
+
+Watch for the indirect form: `with_temp_jcode_home`, `with_reasoning_current_home`
+and `with_ssh_remote_test_home` all take the env lock inside, so calling one while
+holding a render lock is the same inversion. Usually you do not need an explicit
+render lock at all, because `create_test_app` already takes it.
+
+`tui::ui::tests::test_locks_are_always_taken_env_before_render` enforces this by
+scanning the source; it names the file, line, and offending call. It is a static
+check because the deadlock is timing-dependent: the isolated two-test repro took
+about five runs to wedge, so a green run proves very little.
+
+### If the suite hangs anyway
+
+Two inverted tests used to wedge every worker at any thread count above 2, which
+silently hid every test after the wedge. That is how a batch of real Windows
+failures survived for months, and why the whole suite now runs in ~50s at the
+default 16 threads. To diagnose a new one, dump the stacks of the hung process:
 
 ```bash
-cargo test -p jcode-tui --lib -- --test-threads=2
+gdb -p <pid> --batch -ex "set pagination off" -ex "thread apply all bt 25"
 ```
 
-This is not a slow suite, it is a hang. Every worker blocks and the run never
-finishes, so whatever had not been reached yet is silently never tested. That is
-how a batch of real Windows failures survived for months: the suite never got far
-enough to report them.
-
-What is established, measured on a 16-core machine:
-
-| `--test-threads` | result |
-|---|---|
-| 1 | 0 hangs, whole suite in ~127s |
-| 2 | 0 hangs, ~89s (fastest) |
-| 4 | 4 hang |
-| 8 | 8 hang |
-| 16 (default) | 16 hang |
-
-Exactly `--test-threads` many wedge, i.e. all of them. A gdb thread dump
-(`gdb -p <pid> --batch -ex "thread apply all bt"`) shows them split across
-`jcode_base::storage::lock_test_env` and `jcode_tui::tui::ui::render_state_test_lock`
-with **no thread holding either lock**, so a guard is leaking from a worker that
-is already gone. Which test leaks it is not yet identified: the wedged set is just
-whatever was in flight, and it moves with the thread count.
-
-Ruled out so far: it is not the SSH tests (that group alone passes at 4 threads),
-and it is not a live network call under the lock (`JCODE_OFFLINE=1` still hangs).
-This reproduces on upstream `master`, so it is not specific to any one branch.
+Read it carefully: holding a mutex leaves no stack frame, so a thread that owns
+one lock while blocking on the other looks identical to a thread that owns
+nothing. "No thread holds either lock" is what an A-then-B/B-then-A cycle looks
+like, not evidence of a leaked guard. Match each blocked test against the order
+it takes the two locks.
