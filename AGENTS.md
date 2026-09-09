@@ -89,11 +89,15 @@ They pass individually and serially. This is test isolation, not product
 behavior.
 
 That figure is per-crate and does not generalize. `jcode-app-core` run serially
-is **1168 passed / 36 failed** (measured 2026-09-09 on Windows), and those 36
-are stable across runs rather than shifting, so they are ordinary failures
-rather than an isolation problem. Two of its tests also used to hang forever
-rather than fail, which is why no serial figure existed for it at all before:
-see "A hang is not a failure" below.
+is **1203 passed / 2 failed** (measured 2026-09-09 on Windows), down from
+1168/36 once the 34 ordinary failures were fixed. The remaining two
+(`debug_tool_selfdev_reload_returns_promptly_for_direct_execution` and
+`external_background_task_wake_emits_request_without_starting_turn`) pass
+individually, so they are the same isolation problem as `jcode-tui`, not
+product behavior. `jcode-base` is **1298 passed / 17 failed**, and those 17 are
+upstream's. Two app-core tests also used to hang forever rather than fail,
+which is why no serial figure existed for it at all before: see "A hang is not
+a failure" below.
 
 The cause is that env vars are process-global while ~800 tests read them
 concurrently. `lock_test_env` only excludes other env-*mutating* tests, so a
