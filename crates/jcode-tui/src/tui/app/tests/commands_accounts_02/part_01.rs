@@ -544,9 +544,11 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             app.input = "/account switch openai2".to_string();
             app.submit_input();
 
+            // Accounts are canonically labelled after animals (b28720562),
+            // so the first one is `openai-otter`, not `openai-1`.
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
-                Some("openai-1")
+                Some("openai-otter")
             );
         });
     });
