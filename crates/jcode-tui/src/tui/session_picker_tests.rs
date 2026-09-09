@@ -1425,9 +1425,15 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
+    // Right-aligned, not at a fixed column: the label is what sets `start_x`,
+    // so a hardcoded threshold breaks every time the copy changes (it did, in
+    // e90512dd6). Measure the gap to the right edge instead, which is the
+    // property "bottom-right" actually means.
+    let start_right_gap = buffer.area.width as usize - lines[start_y].trim_end().chars().count();
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
+        start_y >= buffer.area.height as usize - 3 && start_right_gap <= 4,
+        "blank-session action should stay secondary in the bottom-right \
+         (row {start_y}, col {start_x}, {start_right_gap} cols from the right edge): {lines:#?}"
     );
 }
 
