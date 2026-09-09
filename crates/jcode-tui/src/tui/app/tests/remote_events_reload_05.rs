@@ -716,6 +716,11 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         // Simulate the turn running, then the cycle completing.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        // With every todo complete, the next call is the one-time
+        // "all todos done" handoff, which legitimately returns true. This test
+        // is about the digest re-arming after that, so mark the handoff as
+        // already delivered (same as the sibling test below).
+        app.todo_final_response_requested = true;
         assert!(
             !app.schedule_auto_poke_followup_if_needed(),
             "with nothing left outstanding the cycle should finish"
