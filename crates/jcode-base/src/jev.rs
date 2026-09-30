@@ -12,6 +12,7 @@ use std::time::Duration;
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
+const LOOP_PROVIDER_ENV: &str = "JCODE_LOOP_JEV_PROVIDER";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
@@ -42,6 +43,8 @@ enum JevPurpose {
     Memory,
     Browser,
     Voice,
+    /// `jcode jev-loop` forks: typed choice questions settled on BYOK keys.
+    Loop,
 }
 
 impl JevPurpose {
@@ -50,6 +53,7 @@ impl JevPurpose {
             Self::Memory => "memory",
             Self::Browser => "browser",
             Self::Voice => "voice",
+            Self::Loop => "loop",
         }
     }
 
@@ -59,6 +63,8 @@ impl JevPurpose {
             Self::Browser => "browser_jev",
             // Voice uses the gateway's existing typed noul contract.
             Self::Voice => "memory_jev",
+            // Never reached: loop routing refuses the Jcode gateway (BYOK only).
+            Self::Loop => "loop_jev",
         }
     }
 
@@ -71,13 +77,13 @@ impl JevPurpose {
             Self::Memory => PROVIDER_ENV,
             Self::Browser => BROWSER_PROVIDER_ENV,
             Self::Voice => VOICE_PROVIDER_ENV,
+            Self::Loop => LOOP_PROVIDER_ENV,
         };
         match env(key) {
             Ok(value) => Ok(value),
             Err(std::env::VarError::NotPresent) => Ok(match self {
                 Self::Memory => memory_default(),
-                Self::Browser => "auto".into(),
-                Self::Voice => "auto".into(),
+                Self::Browser | Self::Voice | Self::Loop => "auto".into(),
             }),
             Err(_) => bail!("{key} must contain a valid provider name"),
         }
@@ -178,6 +184,14 @@ impl JevClient {
         Self::for_purpose(JevPurpose::Voice)
     }
 
+    /// `jcode jev-loop` forks. Uses the caller's own Jev key only (Typesafe
+    /// first, then OpenRouter or AIMLAPI); the Jcode gateway serves memory,
+    /// browser, and voice contracts and has no loop capability. Select a route
+    /// explicitly with JCODE_LOOP_JEV_PROVIDER. Never changes accounts.
+    pub fn for_loop() -> Result<Self> {
+        Self::for_purpose(JevPurpose::Loop)
+    }
+
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
         let build = || {
@@ -215,10 +229,10 @@ impl JevClient {
         let load = |env: &str, file: &str| {
             crate::provider_catalog::load_env_value_from_env_or_config(env, file)
         };
-        let (provider, api_key) = if purpose == JevPurpose::Voice {
-            resolve_voice_with(&selector, load)?
-        } else {
-            resolve_with(&selector, load)?
+        let (provider, api_key) = match purpose {
+            JevPurpose::Voice => resolve_voice_with(&selector, load)?,
+            JevPurpose::Loop => resolve_loop_with(&selector, load)?,
+            JevPurpose::Memory | JevPurpose::Browser => resolve_with(&selector, load)?,
         };
         let base = if provider == JevProvider::Jcode {
             crate::subscription_api::configured_api_base()
@@ -379,6 +393,7 @@ impl JevClient {
                     JevPurpose::Memory => "Jcode Memory",
                     JevPurpose::Browser => "Jcode Browser",
                     JevPurpose::Voice => "Jcode Voice",
+                    JevPurpose::Loop => "Jcode Loop",
                 },
             );
         }
@@ -435,6 +450,29 @@ fn resolve_voice_with(
         }
         _ => bail!(
             "Invalid voice Jev provider. Choose auto, typesafe, or jcode; voice never uses OpenRouter or AIMLAPI"
+        ),
+    }
+}
+
+/// Loop forks ask choice questions, which the Jcode gateway does not serve
+/// (its non-browser contract is noul-only). Route to BYOK keys only, so a
+/// subscription credential is never spent on, or refused by, a loop fork.
+fn resolve_loop_with(
+    selector: &str,
+    load: impl FnMut(&str, &str) -> Option<String>,
+) -> Result<(JevProvider, String)> {
+    match selector.trim().to_ascii_lowercase().as_str() {
+        "auto" => resolve_providers(
+            &[
+                JevProvider::TypeSafe,
+                JevProvider::OpenRouter,
+                JevProvider::Aimlapi,
+            ],
+            load,
+        ),
+        "typesafe" | "openrouter" | "aimlapi" => resolve_with(selector, load),
+        _ => bail!(
+            "Invalid loop Jev provider. Choose auto, typesafe, openrouter, or aimlapi; loop forks need your own Jev key"
         ),
     }
 }
@@ -1985,3 +2023,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "jev_loop_tests.rs"]
+mod loop_tests;

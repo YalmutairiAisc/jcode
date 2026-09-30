@@ -38,7 +38,7 @@ mod tokenize;
 
 pub use gate::{GateOutcome, Justification, gate};
 pub use paths::{ProtectedPaths, is_catastrophic_target};
-pub use tokenize::{Token, tokenize};
+pub use tokenize::{Token, split_segments, tokenize};
 
 /// How dangerous a command looks, and therefore how much scrutiny it earns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

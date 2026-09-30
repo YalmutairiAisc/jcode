@@ -295,6 +295,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
+        Some(Command::JevLoop(jev_args)) => {
+            super::jev_loop::run_jev_loop_command(&args.provider, args.model.as_deref(), jev_args)
+                .await?;
+        }
         Some(Command::Login {
             provider: login_provider,
             account,

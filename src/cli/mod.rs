@@ -8,6 +8,7 @@ pub mod commands;
 pub mod debug;
 pub mod dispatch;
 pub mod hot_exec;
+pub mod jev_loop;
 pub mod login;
 pub mod macos_notification_broker;
 pub mod output;

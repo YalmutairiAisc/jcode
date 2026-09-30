@@ -32,6 +32,7 @@ pub mod build;
 pub mod catchup;
 pub mod channel;
 pub use jcode_base::external_auth;
+pub mod jev_loop;
 pub mod mission;
 pub mod network_retry;
 pub mod notifications;

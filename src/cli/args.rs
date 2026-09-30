@@ -193,6 +193,10 @@ pub(crate) enum Command {
         message: String,
     },
 
+    /// Plan a task with Opus, run Sonnet helpers per step, and let Jev settle
+    /// the done/retry/escalate forks between them (Opus decides when Jev is unsure)
+    JevLoop(super::jev_loop::JevLoopArgs),
+
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
         /// Provider to log in to. Equivalent to --provider for this command, e.g. `jcode login google`.
