@@ -63,3 +63,6 @@ impl Outcome {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod guard_tests;

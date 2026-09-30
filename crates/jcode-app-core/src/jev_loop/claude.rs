@@ -159,7 +159,12 @@ impl JcodeClaude {
 
         let model = agent.provider_model();
         let price_key = price_source_key(self.provider.name());
-        let (run, text, usage) = run_metered(&mut agent, prompt, &guard, &price_key, &model).await;
+        let (run, meter) = run_metered(&mut agent, prompt, &guard, &price_key, &model).await;
+        let TurnMeter {
+            usage,
+            text,
+            declined,
+        } = meter;
         let cost_usd = session_cost(&price_key, &model, &usage);
         let stopped = guard.stop_reason();
         if let Some(reason) = &stopped {
@@ -181,6 +186,10 @@ impl JcodeClaude {
             Err(error) if stopped.is_some() => Some(format!("{error:#}")),
             Err(error) => return Err(error),
         };
+        // A model that declines the turn ends it without text and without an
+        // error. Report why, instead of letting callers fail to parse an
+        // empty reply and blame the format.
+        let error = error.or_else(|| declined.filter(|_| text.trim().is_empty()));
         Ok(SessionResult {
             text,
             cost_usd,
@@ -370,14 +379,15 @@ impl UsageTotals {
 /// Run one turn on the streaming path, which reports usage after every model
 /// response. Each report re-prices the session, so an attempt that blows
 /// through its budget is stopped mid-turn rather than after it finishes.
-/// Returns the turn result, the final response's text, and total usage.
+/// Returns the turn result and what the meter saw: usage, the final
+/// response's text, and whether the model declined the turn.
 async fn run_metered(
     agent: &mut Agent,
     prompt: &str,
     guard: &Arc<SessionGuard>,
     price_key: &str,
     model: &str,
-) -> (Result<()>, String, UsageTotals) {
+) -> (Result<()>, TurnMeter) {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut meter = TurnMeter::default();
     let run = {
@@ -397,15 +407,17 @@ async fn run_metered(
     while let Ok(event) = event_rx.try_recv() {
         meter.observe(event);
     }
-    (run, meter.text, meter.usage)
+    (run, meter)
 }
 
-/// Tracks a streaming turn: summed usage, and the text of the latest model
-/// response (a tool call starts a new response, so its text is discarded).
+/// Tracks a streaming turn: summed usage, the text of the latest model
+/// response (a tool call starts a new response, so its text is discarded),
+/// and the provider's explanation when the model declined to answer.
 #[derive(Default)]
 pub(crate) struct TurnMeter {
     pub usage: UsageTotals,
     pub text: String,
+    pub declined: Option<String>,
 }
 
 impl TurnMeter {
@@ -419,6 +431,7 @@ impl TurnMeter {
             ServerEvent::TextDelta { text } => self.text.push_str(&text),
             ServerEvent::TextReplace { text } => self.text = text,
             ServerEvent::ToolStart { .. } => self.text.clear(),
+            ServerEvent::ProviderGuardrail { message, .. } => self.declined = Some(message),
             _ => {}
         }
         false

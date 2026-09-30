@@ -154,11 +154,43 @@ impl Tool for GuardedTool {
         self.inner.to_definition()
     }
 
-    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, mut input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         if let Err(refusal) = self.guard.admit(self.inner.name(), &input) {
             anyhow::bail!(refusal);
         }
+        if self.inner.name() == "bash" {
+            hide_credentials(&mut input);
+        }
         self.inner.execute(input, ctx).await
+    }
+}
+
+/// Shell lines run ahead of every loop `bash` command. They point the AWS,
+/// GitHub, Kubernetes, Google Cloud, and Azure tools and SDKs at empty
+/// configuration and drop credential variables, so a program the blocked list
+/// cannot see (`bash deploy.sh`, `boto3`, `terraform` started from Python)
+/// finds no login to act with.
+const CREDENTIAL_ISOLATION: &str = "\
+unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+AWS_CONTAINER_AUTHORIZATION_TOKEN GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN \
+GITHUB_ENTERPRISE_TOKEN GOOGLE_APPLICATION_CREDENTIALS
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+AWS_EC2_METADATA_DISABLED=true GH_CONFIG_DIR=/dev/null/gh KUBECONFIG=/dev/null \
+CLOUDSDK_CONFIG=/dev/null/gcloud AZURE_CONFIG_DIR=/dev/null/azure";
+
+/// Run a loop shell command without this machine's cloud and GitHub logins.
+/// Values the command sets itself (`AWS_ACCESS_KEY_ID=test pytest`) still
+/// apply, because they come after these lines. Unix shells only: on Windows
+/// the bash tool runs `cmd.exe`, which this syntax does not fit.
+pub(crate) fn hide_credentials(input: &mut Value) {
+    if cfg!(windows) {
+        return;
+    }
+    if let Some(command) = input.get("command").and_then(Value::as_str) {
+        let isolated = format!("{CREDENTIAL_ISOLATION}\n{command}");
+        input["command"] = Value::String(isolated);
     }
 }
 

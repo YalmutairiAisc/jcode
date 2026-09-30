@@ -172,8 +172,18 @@ for it to change, keep it committed, and check `git diff` before you keep
 anything. jcode's destructive-command gate still runs inside the bash tool as
 a second layer behind the loop's own blocked-command check.
 
-The blocked list reads the command line only. It cannot see what a script,
-a `make` target, `python -c`, an SDK such as `boto3`, `curl`, or a database
-client (`psql "$DATABASE_URL" ...`) does once it runs. If the shell can
-reach production (logged-in cloud CLIs, deploy tokens, database URLs, SSH
-keys), run the loop in a container, VM, or user account that cannot.
+The blocked list reads the command line only, so it cannot see what a
+script, a `make` target, `python -c`, or an SDK such as `boto3` does once it
+runs. To cover that, every loop shell command also runs without this
+machine's cloud and GitHub logins: the AWS, GitHub CLI, kubectl, gcloud, and
+Azure tools are pointed at empty or missing configuration and their
+credential variables are unset. A script that reaches for AWS or `gh` finds
+no login, and git's `gh` credential helper hands out nothing over HTTPS.
+Values a command sets itself (`AWS_ACCESS_KEY_ID=test pytest`, as used for
+local test stacks) still apply.
+
+This does not cover everything. Database clients with a URL or password in
+the repo or environment (`psql "$DATABASE_URL"`), `curl` with a token,
+SSH keys, and `git push` over SSH through a script are still reachable. If
+the shell can reach production that way, run the loop in a container, VM, or
+user account that cannot.
