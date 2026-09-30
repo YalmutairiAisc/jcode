@@ -452,11 +452,14 @@ fn to_json<T: serde::Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
 }
 
-fn system_prompt(rules: &str, repo: &Path) -> String {
+pub(crate) fn system_prompt(rules: &str, repo: &Path) -> String {
     format!(
         "You are one part of an automated coding loop working in the git repository at {}.\n\
          Work only inside that repository. Tool calls that break the loop's rules are \
-         refused in code; do not try to work around a refusal.\n\n{}",
+         refused in code; do not try to work around a refusal.\n\
+         Never create commits, branches, tags, or stashes, and never change git config: \
+         leave every change uncommitted in the working tree so a person can review it \
+         with `git diff` and undo it with git.\n\n{}",
         repo.display(),
         rules.trim()
     )

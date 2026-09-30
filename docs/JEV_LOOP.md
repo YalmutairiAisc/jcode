@@ -104,6 +104,13 @@ Invalid values are rejected at startup instead of being ignored.
   (`bash -c '...'`, `eval`) forms are caught too.
 - Each helper attempt has a tool-call cap and an estimated spending cap. When
   either is hit, the attempt is stopped mid-turn and reported as a failure.
+  The planner's read-only sessions have fixed tool-call caps too: judge 8,
+  revise 15, and review 25 match the prototype's `max_turns`; the plan cap
+  of 40 is new (the prototype's planner had none).
+- Every session is told to leave changes uncommitted (no commits, branches,
+  tags, stashes, or git config changes). The prototype got this from Claude
+  Code's system prompt; here it is stated explicitly, because the loop's
+  "review with `git diff`, undo with git" model depends on it.
 - If Jev errors, times out, or returns an answer that does not validate (an
   unknown choice, probabilities that do not sum to one, a choice that
   disagrees with its own probabilities), that fork goes to Opus instead.
@@ -117,6 +124,10 @@ Invalid values are rejected at startup instead of being ignored.
 - The SDK's JSON-schema output mode is replaced by asking for a final JSON
   object and validating it. A missing or malformed reply falls back exactly as
   before: a failed helper report, an `escalate` judgment, or a `stop` revision.
+- Sessions use a loop-specific system prompt instead of jcode's default one,
+  so the target repo's `AGENTS.md` is not injected. This matches the Agent SDK,
+  which does not load project settings unless asked. Helpers still read files
+  in the repo when a step needs them.
 - The Fable advisor setting is not ported: jcode has no advisor hook for
   per-session settings.
 - Costs are estimated from token usage at public per-token prices. On a

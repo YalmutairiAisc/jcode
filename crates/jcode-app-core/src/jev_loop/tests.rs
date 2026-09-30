@@ -707,6 +707,17 @@ async fn spending_over_budget_stops_the_session() {
 // --------------------------------------------------------------- reports
 
 #[test]
+fn every_session_is_told_to_leave_changes_uncommitted() {
+    // The prototype ran every session on Claude Code's preset, which never
+    // commits unless asked; the loop's review-and-undo model depends on it.
+    let prompt = super::claude::system_prompt("RULES", std::path::Path::new("/repo"));
+    assert!(prompt.contains("/repo"));
+    assert!(prompt.contains("Never create commits"));
+    assert!(prompt.contains("leave every change uncommitted"));
+    assert!(prompt.trim_end().ends_with("RULES"));
+}
+
+#[test]
 fn turn_meter_sums_usage_and_keeps_only_the_final_response_text() {
     use super::claude::{TurnMeter, UsageTotals, session_cost};
     use crate::protocol::ServerEvent;
