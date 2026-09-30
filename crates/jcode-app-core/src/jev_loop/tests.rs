@@ -280,6 +280,50 @@ async fn jev_saying_done_on_a_failed_check_is_overruled() {
 }
 
 #[tokio::test]
+async fn the_planner_cannot_accept_a_failed_check_either() {
+    // Jev is unsure; Opus wrongly says done while the check failed. The
+    // README's rule ("never accepted as done if its check failed") binds
+    // everyone, so code turns it into a retry. The retry then passes.
+    let claude = MockClaude::with(vec![step(1)], vec![report(false), report(true)])
+        .judgments(vec![Outcome::Done]);
+    let run = run_loop(
+        &claude,
+        jev_with(vec![
+            Ok(jev_answer("done", 0.4)),
+            Ok(jev_answer("done", 0.95)),
+        ]),
+    )
+    .await;
+
+    assert_eq!(claude.count("helper"), 2, "the failed attempt is retried");
+    assert_eq!(run.forks[0]["route"], "split");
+    assert_eq!(run.forks[0]["decided_by"], "rule");
+    assert_eq!(run.forks[0]["final_decision"], "retry");
+    assert_eq!(
+        run.forks[0]["opus_reason"],
+        "overruled: opus said done but the check failed (opus says so)"
+    );
+    assert_eq!(run.forks[1]["decided_by"], "jev");
+    assert_eq!(run.summary.stats.rule_overrides, 1);
+    assert!(run.summary.finished);
+}
+
+#[tokio::test]
+async fn an_opus_done_on_a_failed_final_attempt_escalates() {
+    // The rule override (done -> retry) still respects the attempt cap.
+    let claude = MockClaude::with(vec![step(1)], vec![report(false); 3]).judgments(vec![
+        Outcome::Retry,
+        Outcome::Retry,
+        Outcome::Done,
+    ]);
+    let run = run_loop(&claude, JevLayer::new(None, 0.8)).await;
+    assert_eq!(run.forks[2]["final_decision"], "escalate");
+    assert_eq!(run.forks[2]["decided_by"], "rule");
+    assert_eq!(run.summary.stats.rule_overrides, 2);
+    assert!(!run.summary.finished);
+}
+
+#[tokio::test]
 async fn jev_errors_and_invalid_answers_fall_back_to_the_planner() {
     let bad_answer = json!({"answers": {"q": {"type": "choice", "choice": "ship_it",
         "confidence": 0.99, "probabilities": {"done": 0.01, "retry": 0.0, "ship_it": 0.99}}}});
@@ -649,6 +693,14 @@ async fn spending_over_budget_stops_the_session() {
         guard.tool_calls(),
         1,
         "refused calls after a stop are not counted"
+    );
+
+    // Sub-cent budgets stay readable instead of printing `$0.00 of $0.00`.
+    let tiny = SessionGuard::new(40, Some(0.001), BLOCKED_COMMANDS);
+    tiny.record_spend(0.0042);
+    assert_eq!(
+        tiny.stop_reason().as_deref(),
+        Some("spending cap reached ($0.0042 of $0.0010 for this attempt)")
     );
 }
 

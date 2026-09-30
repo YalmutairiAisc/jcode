@@ -176,8 +176,13 @@ impl Loop<'_> {
             }
 
             if revisions >= self.config.max_revisions_per_step {
+                let why = match revisions {
+                    0 => "and no revisions are allowed".to_string(),
+                    1 => "after a revision".to_string(),
+                    n => format!("after {n} revisions"),
+                };
                 self.out.line(&format!(
-                    "    stopping: step {} is still stuck after a revision",
+                    "    stopping: step {} is still stuck {why}",
                     step.id
                 ));
                 self.log_step(step, report, true, String::new());
@@ -263,8 +268,7 @@ impl Loop<'_> {
             self.stats.rule_overrides += 1;
         }
 
-        // Split forks (Jev unsure, off, or unreachable) go to the planner,
-        // whose decision stands, exactly as in the prototype.
+        // Split forks (Jev unsure, off, or unreachable) go to the planner.
         let mut settled = match (fork.route, fork.answer) {
             (Route::Sharp, Some(answer)) => {
                 self.stats.sharp += 1;
@@ -278,6 +282,19 @@ impl Loop<'_> {
                 Settled::new(judgment.decision, DecidedBy::Opus, judgment.reason)
             }
         };
+
+        // The same rule binds the planner: "a step is never accepted as done
+        // if its check failed". The prototype only enforced it against Jev,
+        // so an Opus "done" could slip through; a failed check means retry.
+        if settled.decision == Outcome::Done && !report.check_passed {
+            let opus_said = std::mem::take(&mut settled.reason);
+            settled = Settled::new(
+                Outcome::Retry,
+                DecidedBy::Rule,
+                format!("overruled: opus said done but the check failed ({opus_said})"),
+            );
+            self.stats.rule_overrides += 1;
+        }
 
         // Hard limit in code: too many attempts means escalate, whatever anyone said.
         if settled.decision == Outcome::Retry && attempt >= self.config.max_attempts_per_step {

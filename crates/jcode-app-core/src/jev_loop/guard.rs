@@ -64,7 +64,9 @@ impl SessionGuard {
             && spent_usd > budget
         {
             self.stop(format!(
-                "spending cap reached (${spent_usd:.2} of ${budget:.2} for this attempt)"
+                "spending cap reached (${} of ${} for this attempt)",
+                usd(spent_usd),
+                usd(budget)
             ));
         }
     }
@@ -103,6 +105,16 @@ impl SessionGuard {
             ));
         }
         Ok(())
+    }
+}
+
+/// Dollars with cents, or more digits for sub-cent amounts so a tiny budget
+/// never reads as `$0.00 of $0.00`.
+fn usd(amount: f64) -> String {
+    if amount.abs() >= 0.01 || amount == 0.0 {
+        format!("{amount:.2}")
+    } else {
+        format!("{amount:.4}")
     }
 }
 

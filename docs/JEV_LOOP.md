@@ -92,8 +92,10 @@ Invalid values are rejected at startup instead of being ignored.
 
 ## Rules that live in code (not in prompts)
 
-- A step is never accepted as done by Jev if its check failed. The fork is
-  sent to Opus instead and counted as a rule override.
+- A step is never accepted as done if its check failed. If Jev says done,
+  the fork goes to Opus instead; if Opus says done, code turns it into a
+  retry. Both count as rule overrides. (The prototype's code only enforced
+  this against Jev; the port enforces the README's rule for both.)
 - After `MAX_ATTEMPTS_PER_STEP` tries, a step is escalated no matter what.
 - Opus may rewrite a stuck step once, then the run stops for you to decide.
 - Blocked commands (`git push`, `git reset --hard`, `git clean`, `rm -rf`,
@@ -120,6 +122,10 @@ Invalid values are rejected at startup instead of being ignored.
 - Costs are estimated from token usage at public per-token prices. On a
   subscription (OAuth) route nothing is billed per token, but the numbers are
   still the right way to compare a Jev run against a `--no-jev` baseline.
+- Every planner, helper, judge, reviser, and reviewer call is an ordinary
+  jcode session titled `jev-loop <role>`, saved with its full transcript, so
+  you can inspect exactly what each one did (for example with
+  `jcode --resume <session>`).
 
 ## Safety note
 

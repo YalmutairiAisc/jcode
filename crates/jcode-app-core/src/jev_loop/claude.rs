@@ -161,8 +161,21 @@ impl JcodeClaude {
         let price_key = price_source_key(self.provider.name());
         let (run, text, usage) = run_metered(&mut agent, prompt, &guard, &price_key, &model).await;
         let cost_usd = session_cost(&price_key, &model, &usage);
-        agent.mark_closed();
         let stopped = guard.stop_reason();
+        if let Some(reason) = &stopped {
+            // A guard stop cancels through the agent's shutdown signal, which
+            // the runtime records as a "server reload" interruption. Close the
+            // transcript with the real reason, so it reads correctly and is
+            // never mistaken for a reload-interrupted session to resume.
+            agent.add_message(
+                crate::message::Role::Assistant,
+                vec![crate::message::ContentBlock::Text {
+                    text: format!("[jev-loop stopped this session: {reason}]"),
+                    cache_control: None,
+                }],
+            );
+        }
+        agent.mark_closed();
         let error = match run {
             Ok(()) => None,
             Err(error) if stopped.is_some() => Some(format!("{error:#}")),
