@@ -128,8 +128,14 @@ Invalid values are rejected at startup instead of being ignored.
   so the target repo's `AGENTS.md` is not injected. This matches the Agent SDK,
   which does not load project settings unless asked. Helpers still read files
   in the repo when a step needs them.
-- The Fable advisor setting is not ported: jcode has no advisor hook for
-  per-session settings.
+- The Fable advisor is not ported. The prototype's `advisorModel` setting
+  turned on Anthropic's server-side advisor tool through Claude Code. jcode's
+  Anthropic client sends only its own tools and skips server-tool blocks in
+  responses, so the advisor needs provider work first: send the tool and its
+  beta header, round-trip `advisor_tool_result` blocks, resume `pause_turn`,
+  and price advisor usage for the spending cap. To give the planner Fable
+  instead, set `JCODE_JEV_LOOP_PLANNER_MODEL=claude-fable-5-1` (2.5 times the
+  per-token price of Opus 5.5).
 - Costs are estimated from token usage at public per-token prices. On a
   subscription (OAuth) route nothing is billed per token, but the numbers are
   still the right way to compare a Jev run against a `--no-jev` baseline.
@@ -144,4 +150,7 @@ Helpers can edit files and run shell commands in the repo without asking.
 That is what makes the loop autonomous. Only point it at a repo you are happy
 for it to change, keep it committed, and check `git diff` before you keep
 anything. jcode's destructive-command gate still runs inside the bash tool as
-a second layer behind the loop's own blocked-command check.
+a second layer behind the loop's own blocked-command check, but neither layer
+stops deploy or cloud commands: `gh workflow run`, `terraform apply`,
+`aws ...`, and database clients all pass. If the shell can reach production
+(logged-in CLIs, deploy tokens, database URLs), run the loop where it cannot.
