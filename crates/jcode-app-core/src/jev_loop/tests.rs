@@ -568,6 +568,175 @@ fn blocked_commands_are_caught_through_chains_wrappers_and_nesting() {
     }
 }
 
+#[test]
+fn commands_that_change_state_outside_the_repo_are_blocked() {
+    let blocked = |command: &str| blocked_command(command, BLOCKED_COMMANDS);
+    for (command, expected) in [
+        // GitHub, cloud, and cluster CLIs, and remote shells.
+        ("gh workflow run deploy-prod.yml", "gh"),
+        ("gh pr create --fill", "gh"),
+        ("/usr/bin/gh api repos/o/r", "gh"),
+        (
+            "aws ecs update-service --cluster prod --service api --force-new-deployment",
+            "aws",
+        ),
+        ("AWS_PROFILE=prod aws s3 ls", "aws"),
+        ("gcloud run deploy api", "gcloud"),
+        ("az webapp up", "az"),
+        ("kubectl --context prod apply -f k8s/", "kubectl"),
+        ("ssh deploy@host 'systemctl restart api'", "ssh"),
+        ("scp build.tar deploy@host:/srv", "scp"),
+        // Infrastructure changes, with options before the subcommand.
+        (
+            "terraform -chdir=infra/terraform apply -auto-approve",
+            "terraform apply",
+        ),
+        ("terraform destroy", "terraform destroy"),
+        ("terraform state rm aws_s3_bucket.logs", "terraform state"),
+        ("tofu apply", "tofu apply"),
+        ("pulumi up --yes", "pulumi up"),
+        ("cdk deploy --all", "cdk deploy"),
+        ("helm -n prod upgrade api ./chart", "helm upgrade"),
+        (
+            "helm --kube-context prod install api ./chart",
+            "helm install",
+        ),
+        // Hosting deploys, directly or through a package runner.
+        ("vercel --prod", "vercel"),
+        ("npx vercel deploy --prod", "vercel"),
+        ("npx vercel@latest --prod", "vercel"),
+        ("fly deploy", "fly"),
+        ("npx wrangler deploy", "wrangler"),
+        ("npx netlify-cli deploy --prod", "netlify-cli"),
+        ("npx firebase-tools deploy", "firebase-tools deploy"),
+        ("firebase --project prod deploy", "firebase deploy"),
+        ("npx aws-cdk deploy", "aws-cdk deploy"),
+        ("sam deploy --guided", "sam deploy"),
+        ("npx serverless deploy", "serverless deploy"),
+        // Image pushes.
+        ("docker push registry/app:1", "docker push"),
+        ("docker --context prod push registry/app:1", "docker push"),
+        ("docker image push registry/app:1", "docker image push"),
+        (
+            "docker buildx build --push -t registry/app .",
+            "docker buildx build --push",
+        ),
+        ("podman push registry/app:1", "podman push"),
+        // Package releases, including through runners and toolchains.
+        ("npm publish", "npm publish"),
+        ("npm --workspace api publish", "npm publish"),
+        ("npm --tag beta publish", "npm publish"),
+        (
+            "docker --tlscacert ca.pem push registry/app:1",
+            "docker push",
+        ),
+        ("pnpm -r publish", "pnpm publish"),
+        ("cargo +nightly publish", "cargo publish"),
+        ("uv publish", "uv publish"),
+        ("twine upload dist/*", "twine upload"),
+        ("python -m twine upload dist/*", "twine upload"),
+        ("python3 -m twine upload dist/*", "twine upload"),
+        ("uv run twine upload dist/*", "twine upload"),
+        ("uvx twine upload dist/*", "twine upload"),
+        ("poetry publish --build", "poetry publish"),
+        // Runners, pipes, and nesting reach the program they start.
+        ("uv run aws s3 ls", "aws"),
+        ("uv run --with awscli -- aws s3 ls", "aws"),
+        ("uv run --directory apps/ops-cli aws s3 ls", "aws"),
+        ("poetry run aws s3 ls", "aws"),
+        ("npm exec -- vercel", "vercel"),
+        ("pnpm exec vercel", "vercel"),
+        ("pnpm dlx vercel", "vercel"),
+        ("bunx vercel", "vercel"),
+        ("npx -p @aws-cdk/cli cdk deploy", "cdk deploy"),
+        ("python -m awscli s3 ls", "awscli"),
+        ("uvx --from awscli aws s3 ls", "aws"),
+        ("echo x | xargs -n 1 aws s3 rm", "aws"),
+        (
+            "find dist -name '*.whl' -exec twine upload {} +",
+            "twine upload",
+        ),
+        ("npx npx vercel", "vercel"),
+        ("uv run bash -c 'terraform apply'", "terraform apply"),
+        ("bash -c 'uv run aws s3 ls'", "aws"),
+        ("cargo test && gh release create v1", "gh"),
+        ("timeout 60 kubectl apply -f x.yaml", "kubectl"),
+        // Other remote state changes.
+        ("git lfs push origin main", "git lfs push"),
+        ("terraform refresh", "terraform refresh"),
+        (
+            "terraform init -migrate-state",
+            "terraform init -migrate-state",
+        ),
+        (
+            "docker build --push -t registry/app .",
+            "docker build --push",
+        ),
+        ("npm unpublish pkg@1.0.0", "npm unpublish"),
+        ("cargo yank --version 1.0.0", "cargo yank"),
+    ] {
+        assert_eq!(blocked(command).as_deref(), Some(expected), "{command}");
+    }
+    // Local checks and read-only commands stay allowed.
+    for command in [
+        "terraform plan",
+        "terraform -chdir=infra/terraform validate",
+        "terraform fmt -check",
+        "terraform init -backend=false",
+        "terraform init",
+        "tofu plan",
+        "helm lint ./chart",
+        "helm template api ./chart",
+        "cdk synth",
+        "npx aws-cdk synth",
+        "sam build",
+        "sam local invoke Fn",
+        "firebase emulators:exec 'npm test'",
+        "npx firebase-tools emulators:exec 'npm test'",
+        "docker build -t app .",
+        "git lfs pull",
+        "docker compose up -d",
+        "docker compose -f docker-compose.yml run --rm api pytest",
+        "docker run --rm app pytest",
+        "docker buildx build -t app .",
+        "npm test",
+        "npm run build",
+        "npm --workspace api test",
+        "npx vitest run",
+        "npx vitest@2 run",
+        "npx tsc --noEmit",
+        "npm install @scope/pkg@1.2.3",
+        "pnpm -r test",
+        "pnpm exec vitest",
+        "yarn test",
+        "cargo test publish",
+        "cargo +nightly test",
+        "cargo run --bin publish-report",
+        "uv run pytest -q",
+        "uv run --directory apps/api pytest tests/test_publish.py",
+        "uvx ruff check .",
+        "uv build",
+        "python -m pytest -k publish",
+        "python -m build",
+        "python -c 'print(1)'",
+        "python scripts/check.py",
+        "poetry run pytest",
+        "twine check dist/*",
+        "grep -rn 'aws ' src",
+        "echo 'gh workflow run x'",
+        "ls ~/.aws",
+        "cat infra/terraform/main.tf",
+        "git log --oneline -5",
+        "git -C apps/web status",
+        "find . -name '*.py' -exec grep -l publish {} +",
+        "echo a b | xargs -n 1 echo",
+        "make test",
+        "rg ssh docs",
+    ] {
+        assert_eq!(blocked(command), None, "{command}");
+    }
+}
+
 /// Records every call that reaches the real tool.
 struct CountingTool(Arc<Mutex<Vec<String>>>);
 

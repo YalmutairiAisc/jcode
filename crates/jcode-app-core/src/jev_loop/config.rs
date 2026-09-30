@@ -40,16 +40,120 @@ pub const PLAN_MAX_TOOL_CALLS: u32 = 40;
 pub const FORK_LOG: &str = "forks.jsonl";
 
 /// Commands no session in this loop may run, whatever a model says. Matched
-/// against every shell command segment (so `cd x && git push` is caught).
-/// Word sequences, compared token by token; `*` is not needed because a
-/// prefix of words matches any arguments after it.
+/// against every shell command segment (so `cd x && git push` is caught),
+/// after wrappers (`env`, `timeout`, `npx`, `uv run`, `python -m`, ...) and
+/// a program's own options before its subcommand are skipped. A one-word
+/// entry blocks the whole program; a longer entry blocks a subcommand, and
+/// any words after the subcommand must appear somewhere in the arguments.
+///
+/// Beyond the prototype's five entries, everything here changes state
+/// outside the working tree, where `git diff` cannot show it and git cannot
+/// undo it. This is a denylist on the command line, not a sandbox.
 pub const BLOCKED_COMMANDS: &[&[&str]] = &[
+    // The prototype's list.
     &["git", "push"],
     &["git", "reset", "--hard"],
     &["git", "clean"],
     &["rm", "-rf"],
     &["rm", "-fr"],
     &["sudo"],
+    // Other git commands that send work out of the repo.
+    &["git", "lfs", "push"],
+    &["git", "send-email"],
+    // Whole programs whose normal job is acting on remote systems.
+    &["gh"],
+    &["aws"],
+    &["awscli"], // `python -m awscli`
+    &["gcloud"],
+    &["az"],
+    &["kubectl"],
+    &["copilot"],
+    &["eb"],
+    &["ecs-cli"],
+    &["ssh"],
+    &["scp"],
+    &["sftp"],
+    &["vercel"],
+    &["heroku"],
+    &["netlify"],
+    &["netlify-cli"],
+    &["fly"],
+    &["flyctl"],
+    &["wrangler"],
+    // Subcommands that change remote state, for programs that also have
+    // local uses the loop needs as checks (`terraform plan`, `helm lint`,
+    // `cdk synth`, `sam local`, `firebase emulators:exec`).
+    &["terraform", "apply"],
+    &["terraform", "destroy"],
+    &["terraform", "import"],
+    &["terraform", "refresh"],
+    &["terraform", "state"],
+    &["terraform", "taint"],
+    &["terraform", "untaint"],
+    &["terraform", "force-unlock"],
+    &["terraform", "workspace"],
+    &["terraform", "init", "-migrate-state"],
+    &["tofu", "apply"],
+    &["tofu", "destroy"],
+    &["tofu", "import"],
+    &["tofu", "refresh"],
+    &["tofu", "state"],
+    &["tofu", "taint"],
+    &["tofu", "untaint"],
+    &["tofu", "force-unlock"],
+    &["tofu", "workspace"],
+    &["tofu", "init", "-migrate-state"],
+    &["pulumi", "up"],
+    &["pulumi", "destroy"],
+    &["pulumi", "refresh"],
+    &["pulumi", "import"],
+    &["pulumi", "state"],
+    &["cdk", "deploy"],
+    &["cdk", "destroy"],
+    &["cdk", "bootstrap"],
+    &["aws-cdk", "deploy"], // `npx aws-cdk deploy`
+    &["aws-cdk", "destroy"],
+    &["aws-cdk", "bootstrap"],
+    &["sam", "deploy"],
+    &["sam", "delete"],
+    &["sam", "sync"],
+    &["serverless", "deploy"],
+    &["serverless", "remove"],
+    &["sls", "deploy"],
+    &["sls", "remove"],
+    &["helm", "install"],
+    &["helm", "upgrade"],
+    &["helm", "uninstall"],
+    &["helm", "rollback"],
+    &["helm", "push"],
+    &["firebase", "deploy"],
+    &["firebase-tools", "deploy"], // `npx firebase-tools deploy`
+    // Container image pushes.
+    &["docker", "push"],
+    &["docker", "image", "push"],
+    &["docker", "manifest", "push"],
+    &["docker", "compose", "push"],
+    &["docker", "build", "--push"],
+    &["docker", "buildx", "build", "--push"],
+    &["docker", "buildx", "bake", "--push"],
+    &["docker-compose", "push"],
+    &["podman", "push"],
+    // Package registry changes.
+    &["npm", "publish"],
+    &["npm", "unpublish"],
+    &["npm", "deprecate"],
+    &["npm", "dist-tag"],
+    &["pnpm", "publish"],
+    &["yarn", "publish"],
+    &["yarn", "npm", "publish"],
+    &["cargo", "publish"],
+    &["cargo", "yank"],
+    &["cargo", "owner"],
+    &["twine", "upload"],
+    &["uv", "publish"],
+    &["poetry", "publish"],
+    &["gem", "push"],
+    &["gem", "yank"],
 ];
 
 #[derive(Clone, Debug, PartialEq)]

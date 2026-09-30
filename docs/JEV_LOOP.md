@@ -98,10 +98,30 @@ Invalid values are rejected at startup instead of being ignored.
   this against Jev; the port enforces the README's rule for both.)
 - After `MAX_ATTEMPTS_PER_STEP` tries, a step is escalated no matter what.
 - Opus may rewrite a stuck step once, then the run stops for you to decide.
-- Blocked commands (`git push`, `git reset --hard`, `git clean`, `rm -rf`,
-  `sudo`) are refused for every session. The check parses the shell command,
-  so chained (`a && git push`), wrapped (`env`, `nice`, `timeout`), and nested
-  (`bash -c '...'`, `eval`) forms are caught too.
+- Blocked commands are refused for every session. The prototype's list
+  (`git push`, `git reset --hard`, `git clean`, `rm -rf`, `sudo`) is extended
+  with commands that change state outside the working tree, where `git diff`
+  cannot show it and git cannot undo it:
+  - whole programs: `gh`, `aws`, `gcloud`, `az`, `kubectl`, `ssh`, `scp`,
+    `sftp`, `vercel`, `heroku`, `netlify`, `fly`, `wrangler`, and a few
+    AWS deploy CLIs;
+  - remote-changing subcommands of tools the loop still needs for checks:
+    `terraform`/`tofu` `apply`, `destroy`, `import`, `refresh`, `state`, ...;
+    `pulumi up`; `cdk`/`sam`/`serverless` `deploy`; `helm` `install`,
+    `upgrade`, `rollback`, ...; `firebase deploy`; `git lfs push`;
+  - image pushes (`docker push`, `docker build --push`, `podman push`, ...)
+    and package registry changes (`npm`/`pnpm`/`yarn`/`cargo`/`uv`/`poetry`
+    `publish`, `twine upload`, `npm unpublish`, `cargo yank`, `gem push`, ...).
+
+  `terraform plan`/`validate`/`init`, `helm lint`/`template`, `cdk synth`,
+  `sam build`, and local `docker build`/`compose` stay allowed. The check
+  parses the shell command, so chained (`a && git push`), wrapped (`env`,
+  `nice`, `timeout`), nested (`bash -c '...'`, `eval`, `$(...)`), and runner
+  (`npx`, `uvx`, `uv run`, `poetry run`, `pnpm exec`, `python -m`, `xargs`,
+  `find -exec`) forms are caught, as are options before the subcommand
+  (`terraform -chdir=infra apply`, `helm -n prod upgrade`,
+  `cargo +nightly publish`). The full list is `BLOCKED_COMMANDS` in
+  `crates/jcode-app-core/src/jev_loop/config.rs`.
 - Each helper attempt has a tool-call cap and an estimated spending cap. When
   either is hit, the attempt is stopped mid-turn and reported as a failure.
   The planner's read-only sessions have fixed tool-call caps too: judge 8,
@@ -150,7 +170,10 @@ Helpers can edit files and run shell commands in the repo without asking.
 That is what makes the loop autonomous. Only point it at a repo you are happy
 for it to change, keep it committed, and check `git diff` before you keep
 anything. jcode's destructive-command gate still runs inside the bash tool as
-a second layer behind the loop's own blocked-command check, but neither layer
-stops deploy or cloud commands: `gh workflow run`, `terraform apply`,
-`aws ...`, and database clients all pass. If the shell can reach production
-(logged-in CLIs, deploy tokens, database URLs), run the loop where it cannot.
+a second layer behind the loop's own blocked-command check.
+
+The blocked list reads the command line only. It cannot see what a script,
+a `make` target, `python -c`, an SDK such as `boto3`, `curl`, or a database
+client (`psql "$DATABASE_URL" ...`) does once it runs. If the shell can
+reach production (logged-in cloud CLIs, deploy tokens, database URLs, SSH
+keys), run the loop in a container, VM, or user account that cannot.

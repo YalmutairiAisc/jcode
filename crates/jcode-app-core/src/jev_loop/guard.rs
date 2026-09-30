@@ -197,17 +197,28 @@ fn blocked_command_at_depth(
             .filter(|token| !token.is_operator)
             .map(|token| token.text.clone())
             .collect();
-        let words = strip_command_prefixes(&words);
-        for pattern in blocked {
-            if matches_pattern(words, pattern) {
+        let words = strip_command_prefixes(&words).to_vec();
+        // `npx vercel`, `uv run aws ...`, `python -m twine upload`: a runner
+        // starts another program, so that program is checked as well.
+        let mut views = vec![words];
+        while views.len() < 4
+            && let Some(target) = views.last().and_then(|view| runner_target(view))
+        {
+            views.push(strip_command_prefixes(&target).to_vec());
+        }
+        for view in &views {
+            if let Some(pattern) = blocked
+                .iter()
+                .find(|pattern| matches_pattern(view, pattern))
+            {
                 return Some(pattern.join(" "));
             }
-        }
-        if depth < 3
-            && let Some(script) = nested_script(words)
-            && let Some(found) = blocked_command_at_depth(&script, blocked, depth + 1)
-        {
-            return Some(found);
+            if depth < 3
+                && let Some(script) = nested_script(view)
+                && let Some(found) = blocked_command_at_depth(&script, blocked, depth + 1)
+            {
+                return Some(found);
+            }
         }
     }
     None
@@ -216,7 +227,7 @@ fn blocked_command_at_depth(
 /// The script a shell wrapper runs: `bash -c '...'`, `sh -lc "..."`, `eval ...`.
 fn nested_script(words: &[String]) -> Option<String> {
     let (program, args) = words.split_first()?;
-    let program = program.rsplit('/').next().unwrap_or(program);
+    let program = program_name(program);
     if program == "eval" {
         return Some(args.join(" "));
     }
@@ -306,9 +317,11 @@ fn is_env_assignment(word: &str) -> bool {
 }
 
 /// A pattern matches when the command's program is the pattern's first word
-/// and every later pattern word appears among the arguments. For `rm` flags
-/// (`-rf`), bundled or split flags (`-r -f`, `-fr`, `-Rf`) also match. For
-/// `git`, options before the subcommand (`git -C dir push`) are skipped.
+/// and, for a longer pattern, the program's subcommand is the pattern's
+/// second word and every later pattern word appears after it. Options before
+/// the subcommand are skipped (`git -C dir push`, `helm -n prod upgrade`,
+/// `terraform -chdir=infra apply`, `cargo +nightly publish`). For `rm` flags
+/// (`-rf`), bundled or split flags (`-r -f`, `-fr`, `-Rf`) also match.
 fn matches_pattern(words: &[String], pattern: &[&str]) -> bool {
     let Some((program, args)) = words.split_first() else {
         return false;
@@ -316,45 +329,263 @@ fn matches_pattern(words: &[String], pattern: &[&str]) -> bool {
     let Some((first, rest)) = pattern.split_first() else {
         return false;
     };
-    let program = program.rsplit('/').next().unwrap_or(program);
+    let program = program_name(program);
     if program != *first {
         return false;
     }
-    if rest.is_empty() {
+    let Some((sub, later)) = rest.split_first() else {
         return true;
-    }
+    };
     if *first == "rm" {
         return rest
             .iter()
             .all(|flag| rm_has_flags(args, flag.trim_start_matches('-')));
     }
-    let args = if *first == "git" {
-        skip_git_global_options(args)
-    } else {
-        args
+    let Some(index) = first_positional(args, global_value_options(program)) else {
+        return false;
     };
-    // The subcommand must come first; later words may appear anywhere.
-    let Some((sub, later)) = rest.split_first() else {
-        return true;
-    };
-    args.first().is_some_and(|arg| arg == sub)
+    args[index] == *sub
         && later
             .iter()
-            .all(|word| args.iter().skip(1).any(|arg| arg == word))
+            .all(|word| args[index + 1..].iter().any(|arg| arg == word))
 }
 
-fn skip_git_global_options(args: &[String]) -> &[String] {
-    let mut rest = args;
-    while let Some(first) = rest.first() {
-        if matches!(first.as_str(), "-C" | "-c" | "--git-dir" | "--work-tree") {
-            rest = rest.get(2..).unwrap_or(&[]);
-        } else if first.starts_with('-') {
-            rest = &rest[1..];
-        } else {
-            break;
+fn program_name(word: &str) -> &str {
+    let base = word.rsplit('/').next().unwrap_or(word);
+    // Package runners accept a version: `npx vercel@latest`, `uvx twine@6`.
+    match base.find('@') {
+        Some(at) if at > 0 => &base[..at],
+        _ => base,
+    }
+}
+
+/// Index of the first word that is neither an option nor an option's value.
+/// Options named in `value_options` take the next word as their value; any
+/// other option is a flag, and `--option=value` is one word. `+toolchain`
+/// counts as a flag. The word after `--` is positional whatever it is.
+fn first_positional(args: &[String], value_options: &[&str]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            return (index + 1 < args.len()).then_some(index + 1);
+        }
+        if arg.len() > 1 && (arg.starts_with('-') || arg.starts_with('+')) {
+            index += if value_options.contains(&arg.as_str()) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+/// Options that take a separate value before a program's subcommand. Only
+/// programs that are blocked by subcommand, or that start runners, need
+/// entries.
+fn global_value_options(program: &str) -> &'static [&'static str] {
+    match program {
+        "git" => &["-C", "-c", "--git-dir", "--work-tree", "--namespace"],
+        "docker" => &[
+            "-c",
+            "--context",
+            "-H",
+            "--host",
+            "--config",
+            "-l",
+            "--log-level",
+            "--tlscacert",
+            "--tlscert",
+            "--tlskey",
+        ],
+        "docker-compose" => &["-f", "--file", "-p", "--project-name", "--env-file"],
+        "podman" => &["-c", "--connection", "--url", "--identity", "--log-level"],
+        "helm" => &["-n", "--namespace", "--kube-context", "--kubeconfig"],
+        "npm" => &[
+            "-w",
+            "--workspace",
+            "--prefix",
+            "--registry",
+            "--userconfig",
+            "--loglevel",
+            "--cache",
+            "--tag",
+            "--access",
+            "--otp",
+        ],
+        "pnpm" => &[
+            "-C",
+            "--dir",
+            "-F",
+            "--filter",
+            "--registry",
+            "--tag",
+            "--access",
+        ],
+        "yarn" => &["--cwd", "--registry"],
+        "cargo" => &["--config", "-Z", "-C", "--color"],
+        "uv" => &[
+            "--directory",
+            "--project",
+            "--config-file",
+            "--cache-dir",
+            "--color",
+        ],
+        "poetry" => &["-C", "--directory", "-P", "--project"],
+        "fly" | "flyctl" => &["-a", "--app", "-c", "--config"],
+        "wrangler" => &["-c", "--config", "-e", "--env", "--cwd"],
+        "firebase" => &["-P", "--project"],
+        "cdk" => &["-a", "--app", "-c", "--context", "--profile"],
+        "pulumi" => &["-C", "--cwd"],
+        _ => &[],
+    }
+}
+
+/// Programs that start another program: the runner, the words that select
+/// its run mode, and the runner's options that take a separate value.
+const RUNNERS: &[(&str, &[&str], &[&str])] = &[
+    ("npx", &[], &["-p", "--package"]),
+    ("pnpx", &[], &["-p", "--package"]),
+    ("bunx", &[], &["-p", "--package"]),
+    (
+        "uvx",
+        &[],
+        &["--from", "-w", "--with", "-p", "--python", "--env-file"],
+    ),
+    (
+        "xargs",
+        &[],
+        &["-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"],
+    ),
+    ("npm", &["exec"], &["-p", "--package"]),
+    ("npm", &["x"], &["-p", "--package"]),
+    ("pnpm", &["exec"], &[]),
+    ("pnpm", &["dlx"], &["-p", "--package"]),
+    ("yarn", &["dlx"], &["-p", "--package"]),
+    ("yarn", &["exec"], &[]),
+    ("bun", &["x"], &["-p", "--package"]),
+    (
+        "uv",
+        &["run"],
+        &[
+            "-w",
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "--package",
+            "--extra",
+            "--group",
+            "--only-group",
+            "--env-file",
+            "--index",
+            "--default-index",
+            "-i",
+            "--index-url",
+            "--extra-index-url",
+            "-p",
+            "--python",
+            "-C",
+            "--config-setting",
+            "--directory",
+            "--project",
+        ],
+    ),
+    (
+        "uv",
+        &["tool", "run"],
+        &[
+            "--from",
+            "-w",
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "-c",
+            "--constraints",
+            "--env-file",
+            "--index",
+            "-i",
+            "--index-url",
+            "-p",
+            "--python",
+            "--directory",
+            "--project",
+        ],
+    ),
+    ("pipx", &["run"], &["--spec", "--python"]),
+    ("poetry", &["run"], &[]),
+    ("pdm", &["run"], &[]),
+    ("hatch", &["run"], &[]),
+    ("bundle", &["exec"], &[]),
+];
+
+/// The program a runner starts, with its arguments: `npx vercel`,
+/// `uv run -- aws s3 ls`, `python -m twine upload`, `xargs -n 1 aws ...`,
+/// `find . -exec twine upload {} +`.
+fn runner_target(words: &[String]) -> Option<Vec<String>> {
+    let (program, args) = words.split_first()?;
+    let program = program_name(program);
+    if program == "python" || program.starts_with("python3") {
+        return python_module(args);
+    }
+    if program == "find" {
+        let start = args
+            .iter()
+            .position(|arg| matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))?;
+        let target = args[start + 1..]
+            .iter()
+            .take_while(|arg| !matches!(arg.as_str(), ";" | "+"))
+            .cloned()
+            .collect();
+        return Some(target);
+    }
+    for (runner, verbs, value_options) in RUNNERS {
+        if program != *runner {
+            continue;
+        }
+        let mut rest = args;
+        if !verbs.is_empty() {
+            let Some(at) = first_positional(rest, global_value_options(program)) else {
+                continue;
+            };
+            let selected = rest.len() >= at + verbs.len()
+                && rest[at..]
+                    .iter()
+                    .zip(verbs.iter())
+                    .all(|(arg, verb)| arg == verb);
+            if !selected {
+                continue;
+            }
+            rest = &rest[at + verbs.len()..];
+        }
+        if let Some(start) = first_positional(rest, value_options) {
+            return Some(rest[start..].to_vec());
         }
     }
-    rest
+    None
+}
+
+/// `python -m module args` gives the module and its arguments. A script or
+/// `-c` code is not followed: the guard cannot see what it runs.
+fn python_module(args: &[String]) -> Option<Vec<String>> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-m" => return args.get(index + 1..).map(<[String]>::to_vec),
+            "-W" | "-X" => index += 2,
+            flag if flag.starts_with("-m") => {
+                let mut target = vec![flag["-m".len()..].to_string()];
+                target.extend_from_slice(&args[index + 1..]);
+                return Some(target);
+            }
+            flag if flag.len() > 1 && flag.starts_with('-') && !flag.starts_with("-c") => {
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn rm_has_flags(args: &[String], wanted: &str) -> bool {
