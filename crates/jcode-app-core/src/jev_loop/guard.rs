@@ -158,10 +158,25 @@ impl Tool for GuardedTool {
         if let Err(refusal) = self.guard.admit(self.inner.name(), &input) {
             anyhow::bail!(refusal);
         }
-        if self.inner.name() == "bash" {
-            hide_credentials(&mut input);
+        if self.inner.name() != "bash" {
+            return self.inner.execute(input, ctx).await;
         }
-        self.inner.execute(input, ctx).await
+        // The bash tool reads the command's first words for its hints, so
+        // take the hint from the helper's own command before the isolation
+        // lines go in front of it.
+        let hint = input
+            .get("command")
+            .and_then(Value::as_str)
+            .and_then(crate::tool::bash::file_edit_hint);
+        hide_credentials(&mut input);
+        let mut output = self.inner.execute(input, ctx).await?;
+        if let Some(hint) = hint
+            && !output.output.contains(hint)
+        {
+            output.output.push_str("\n\n");
+            output.output.push_str(hint);
+        }
+        Ok(output)
     }
 }
 

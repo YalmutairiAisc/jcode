@@ -183,7 +183,8 @@ Values a command sets itself (`AWS_ACCESS_KEY_ID=test pytest`, as used for
 local test stacks) still apply.
 
 This does not cover everything. Database clients with a URL or password in
-the repo or environment (`psql "$DATABASE_URL"`), `curl` with a token,
-SSH keys, and `git push` over SSH through a script are still reachable. If
-the shell can reach production that way, run the loop in a container, VM, or
-user account that cannot.
+the repo or environment (`psql "$DATABASE_URL"`), `curl` with a token, SSH
+keys or a running SSH agent, and registry tokens in `~/.npmrc`, `~/.pypirc`,
+`~/.cargo/credentials.toml`, or `~/.docker/config.json` are still reachable
+from a script. If the shell can reach production that way, run the loop in a
+container, VM, or user account that cannot.

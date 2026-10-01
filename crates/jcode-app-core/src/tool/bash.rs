@@ -933,7 +933,7 @@ instead of silently writing nothing, and show a reviewable diff.";
 
 /// Detect shell commands that rewrite source files in place, where a missed
 /// match silently does nothing. The command still runs, the agent is nudged.
-fn file_edit_hint(command: &str) -> Option<&'static str> {
+pub(crate) fn file_edit_hint(command: &str) -> Option<&'static str> {
     let compact: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let sed_in_place = compact.split(['|', ';', '&']).any(|segment| {
         let mut words = segment.split_whitespace();

@@ -499,7 +499,7 @@ async fn real_bash_tool_in_a_loop_session_sees_no_cloud_logins() {
     let output = tool
         .execute(
             json!({"command": "bash -c 'printf \"%s|%s\\n\" \"$AWS_CONFIG_FILE\" \"${GH_TOKEN-unset}\"'"}),
-            ctx,
+            ctx.clone(),
         )
         .await
         .expect("command runs");
@@ -509,6 +509,29 @@ async fn real_bash_tool_in_a_loop_session_sees_no_cloud_logins() {
         output.output
     );
     assert!(!output.output.contains(config.to_str().unwrap()));
+
+    // The bash tool's own checks still see the helper's command, not the
+    // isolation lines in front of it: an in-place `sed` edit still gets the
+    // "use the edit tool" note.
+    std::fs::write(repo.path().join("f.txt"), "a\n").expect("write file");
+    let edited = tool
+        .execute(json!({"command": "sed -i 's/a/b/' f.txt"}), ctx)
+        .await
+        .expect("sed runs");
+    assert!(
+        edited.output.contains("edits files in place"),
+        "{}",
+        edited.output
+    );
+    assert_eq!(
+        edited.output.matches("edits files in place").count(),
+        1,
+        "the hint appears once even when the bash tool also finds it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+        "b\n"
+    );
 }
 
 #[tokio::test]

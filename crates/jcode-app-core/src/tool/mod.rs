@@ -1,7 +1,7 @@
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
-mod bash;
+pub(crate) mod bash;
 mod batch;
 mod bg;
 #[cfg(unix)]

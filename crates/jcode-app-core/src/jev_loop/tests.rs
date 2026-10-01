@@ -599,6 +599,33 @@ fn turn_meter_sums_usage_and_keeps_only_the_final_response_text() {
     assert_eq!(session_cost("no-such-route", "mystery", &meter.usage), 0.0);
 }
 
+/// A session that ended without text reports its own error (for example the
+/// model declining) instead of a JSON parse error, for every role.
+#[test]
+fn an_empty_session_reports_why_instead_of_a_parse_error() {
+    use super::claude::{SessionResult, session_failure};
+
+    let declined = SessionResult {
+        error: Some("The model declined to answer this request.".into()),
+        ..SessionResult::default()
+    };
+    let parse_error = || anyhow::anyhow!("no JSON object in the reply");
+    assert_eq!(
+        session_failure(&declined, parse_error()),
+        "The model declined to answer this request."
+    );
+    // With text present, the parse error is the real problem.
+    let chatty = SessionResult {
+        text: "Sure, here is my answer without JSON.".into(),
+        error: Some("unrelated".into()),
+        ..SessionResult::default()
+    };
+    assert_eq!(
+        session_failure(&chatty, parse_error()),
+        "no JSON object in the reply"
+    );
+}
+
 #[test]
 fn reports_are_extracted_from_the_last_json_object() {
     let text = "I ran it.\n```json\n{\"summary\": \"old\"}\n```\nFinal:\n\

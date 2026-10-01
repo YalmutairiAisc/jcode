@@ -272,7 +272,10 @@ impl ClaudeCalls for JcodeClaude {
         let result = self.run_session(spec, &prompt).await;
         let judgment = report::parse_judgment(&result.text).unwrap_or_else(|error| Judgment {
             decision: Outcome::Escalate,
-            reason: format!("judge gave no usable decision: {error:#}"),
+            reason: format!(
+                "judge gave no usable decision: {}",
+                session_failure(&result, error)
+            ),
         });
         (judgment, result.cost_usd)
     }
@@ -297,7 +300,7 @@ impl ClaudeCalls for JcodeClaude {
             action: RevisionAction::Stop,
             task: String::new(),
             done_when: String::new(),
-            reason: format!("Revision failed: {error:#}"),
+            reason: format!("Revision failed: {}", session_failure(&result, error)),
         });
         (revision, result.cost_usd)
     }
@@ -463,6 +466,16 @@ pub(crate) fn session_cost(price_key: &str, model: &str, usage: &UsageTotals) ->
 
 fn to_json<T: serde::Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
+}
+
+/// Why a session's reply could not be used: the session's own error (for
+/// example the model declining the request) when it ended with no text,
+/// otherwise the parse error.
+pub(crate) fn session_failure(result: &SessionResult, parse_error: anyhow::Error) -> String {
+    match result.error.as_deref() {
+        Some(error) if result.text.trim().is_empty() => error.to_string(),
+        _ => format!("{parse_error:#}"),
+    }
 }
 
 pub(crate) fn system_prompt(rules: &str, repo: &Path) -> String {
