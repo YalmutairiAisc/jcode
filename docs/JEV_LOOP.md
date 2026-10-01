@@ -54,6 +54,12 @@ Run both on the same task (reset the repo between runs) and compare the cost
 lines in the summary. The exit code is `0` when every step finished and `2`
 when the run stopped for you to decide.
 
+Name the check command exactly as it must run, including the interpreter,
+for example `.venv/bin/python -m pytest -q tests/test_x.py` rather than
+`python -m pytest`. Helper commands can run in a login shell, which reapplies
+your shell profile's `PATH`, so a virtualenv activated before starting the
+loop is not guaranteed to be first on `PATH` for the helpers.
+
 ## Reading the fork log
 
 Every fork is appended to `~/.jcode/jev-loop/forks.jsonl` (one JSON line per
