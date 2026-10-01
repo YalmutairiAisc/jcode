@@ -95,6 +95,10 @@ Defaults match the prototype's `config.py`. Override without rebuilding:
 | `JCODE_JEV_LOOP_MAX_ATTEMPTS` | `3` |
 | `JCODE_JEV_LOOP_MAX_REVISIONS` | `1` |
 | `JCODE_JEV_LOOP_HELPER_MAX_TOOL_CALLS` | `40` |
+| `JCODE_JEV_LOOP_PLAN_MAX_TOOL_CALLS` | `40` |
+| `JCODE_JEV_LOOP_JUDGE_MAX_TOOL_CALLS` | `8` |
+| `JCODE_JEV_LOOP_REVISE_MAX_TOOL_CALLS` | `15` |
+| `JCODE_JEV_LOOP_REVIEW_MAX_TOOL_CALLS` | `25` |
 | `JCODE_JEV_LOOP_STEP_BUDGET_USD` | `2.00` |
 | `JCODE_JEV_LOOP_FORK_LOG` | `~/.jcode/jev-loop/forks.jsonl` |
 
@@ -137,9 +141,11 @@ Invalid values are rejected at startup instead of being ignored.
   The planner's read-only sessions have fixed tool-call caps too: judge 8,
   revise 15, and review 25 match the prototype's `max_turns`; the plan cap
   of 40 is new (the prototype's planner had none). When a read-only session
-  reaches its cap, its next 4 tool calls are refused with "reply now with
-  your answer" instead of ending the turn, so a judge that ran out of reads
-  still returns its decision. It is stopped only if it keeps calling tools.
+  reaches its cap, the tool calls in its next 2 responses are refused with
+  "reply now with your answer" instead of ending the turn, so a judge that
+  ran out of reads still returns its decision. The grace counts responses,
+  not calls, so a response that asks for several reads at once cannot use it
+  up. A tool call in a later response stops the session.
 - Every session is told to leave changes uncommitted (no commits, branches,
   tags, stashes, or git config changes). The prototype got this from Claude
   Code's system prompt; here it is stated explicitly, because the loop's

@@ -207,7 +207,7 @@ impl ClaudeCalls for JcodeClaude {
             "planner",
             format!("{PLAN_RULES}\n{PLAN_FORMAT}"),
             READ_ONLY_TOOLS,
-            config::PLAN_MAX_TOOL_CALLS,
+            self.config.plan_max_tool_calls,
         );
         let result = self
             .run_session(spec, &format!("Plan this request:\n\n{task}"))
@@ -259,7 +259,7 @@ impl ClaudeCalls for JcodeClaude {
             "judge",
             JUDGE_FORMAT.to_string(),
             READ_ONLY_TOOLS,
-            config::JUDGE_MAX_TOOL_CALLS,
+            self.config.judge_max_tool_calls,
         );
         let prompt = format!(
             "A helper just attempted one step. Decide what happens next.\n\
@@ -286,7 +286,7 @@ impl ClaudeCalls for JcodeClaude {
             "reviser",
             REVISE_FORMAT.to_string(),
             READ_ONLY_TOOLS,
-            config::REVISE_MAX_TOOL_CALLS,
+            self.config.revise_max_tool_calls,
         );
         let prompt = format!(
             "This step is stuck. Look at what was tried, check the code if needed, \
@@ -311,7 +311,7 @@ impl ClaudeCalls for JcodeClaude {
             "reviewer",
             REVIEW_RULES.to_string(),
             REVIEW_TOOLS,
-            config::REVIEW_MAX_TOOL_CALLS,
+            self.config.review_max_tool_calls,
         );
         let prompt = format!(
             "Original request:\n{task}\n\nWhat each step reported:\n{}",
@@ -339,7 +339,7 @@ fn session_guard(spec: &SessionSpec<'_>) -> Arc<SessionGuard> {
     let grace = if spec.role == "helper" {
         0
     } else {
-        config::ANSWER_GRACE_TOOL_CALLS
+        config::ANSWER_GRACE_RESPONSES
     };
     SessionGuard::with_answer_grace(
         spec.max_tool_calls,

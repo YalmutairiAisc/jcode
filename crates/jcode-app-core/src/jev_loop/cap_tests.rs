@@ -1,14 +1,14 @@
 //! A read-only loop session that runs out of tool calls still answers.
 //!
 //! The scripted model below behaves like the capped judges seen in real runs:
-//! it keeps reading files and only gives its decision once a tool result tells
+//! it keeps reading files and only gives its answer once a tool result tells
 //! it to stop. Before the answer grace, the call over the cap cancelled the
 //! turn, so the judge returned nothing and the loop recorded "judge gave no
-//! usable decision". Each test runs the real agent and the real guarded
-//! registry under a throwaway `JCODE_HOME`.
+//! usable decision". Each test drives the real agent and the real guarded
+//! registry through `JcodeClaude`, under a throwaway `JCODE_HOME`.
 
 use super::StepSpec;
-use super::claude::{ClaudeCalls, JcodeClaude};
+use super::claude::{ClaudeCalls, JcodeClaude, StepLogEntry};
 use super::config::{self, LoopConfig};
 use super::report::HelperReport;
 use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
@@ -17,32 +17,46 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
-/// Reads `notes.txt` on every response until the latest tool result asks for
-/// an answer, then replies with a judge decision. `stubborn` never answers.
+/// Each response reads `notes.txt` `batch` times (parallel tool calls),
+/// until the latest tool results ask for an answer; then it replies with
+/// `answer`. A `stubborn` model never answers.
 #[derive(Clone)]
 struct ReadsUntilToldProvider {
     model: Arc<Mutex<String>>,
     requests: Arc<Mutex<u32>>,
+    batch: u32,
+    answer: &'static str,
     stubborn: bool,
 }
 
 impl ReadsUntilToldProvider {
-    fn new(stubborn: bool) -> Self {
+    fn new(batch: u32, answer: &'static str, stubborn: bool) -> Self {
         Self {
             model: Arc::new(Mutex::new("claude-opus-5-5".into())),
             requests: Arc::new(Mutex::new(0)),
+            batch,
+            answer,
             stubborn,
         }
     }
+
+    fn requests(&self) -> u32 {
+        *self.requests.lock().unwrap()
+    }
 }
 
+/// True when any tool result since the model's last response carries the
+/// guard's "reply now" refusal.
 fn told_to_answer(messages: &[Message]) -> bool {
-    messages.last().is_some_and(|message| {
-        message.content.iter().any(|block| {
+    messages
+        .iter()
+        .rev()
+        .take_while(|message| message.role != crate::message::Role::Assistant)
+        .flat_map(|message| message.content.iter())
+        .any(|block| {
             matches!(block, ContentBlock::ToolResult { content, .. }
                 if content.contains("reply now with your answer"))
         })
-    })
 }
 
 #[async_trait]
@@ -59,28 +73,27 @@ impl Provider for ReadsUntilToldProvider {
             *requests += 1;
             *requests
         };
-        let events = if told_to_answer(messages) && !self.stubborn {
-            vec![
-                StreamEvent::TextDelta(
-                    "{\"decision\": \"done\", \"reason\": \"read enough\"}".into(),
-                ),
-                StreamEvent::MessageEnd {
-                    stop_reason: Some("end_turn".into()),
-                },
-            ]
+        let mut events = Vec::new();
+        if told_to_answer(messages) && !self.stubborn {
+            events.push(StreamEvent::TextDelta(self.answer.into()));
+            events.push(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            });
         } else {
-            vec![
-                StreamEvent::ToolUseStart {
-                    id: format!("read-{call}"),
-                    name: "read".into(),
-                },
-                StreamEvent::ToolInputDelta("{\"file_path\": \"notes.txt\"}".into()),
-                StreamEvent::ToolUseEnd,
-                StreamEvent::MessageEnd {
-                    stop_reason: Some("tool_use".into()),
-                },
-            ]
-        };
+            for n in 0..self.batch {
+                events.extend([
+                    StreamEvent::ToolUseStart {
+                        id: format!("read-{call}-{n}"),
+                        name: "read".into(),
+                    },
+                    StreamEvent::ToolInputDelta("{\"file_path\": \"notes.txt\"}".into()),
+                    StreamEvent::ToolUseEnd,
+                ]);
+            }
+            events.push(StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".into()),
+            });
+        }
         Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
     }
 
@@ -134,39 +147,52 @@ impl Drop for IsolatedHome {
     }
 }
 
-async fn judge_with(provider: &ReadsUntilToldProvider) -> super::report::Judgment {
-    let repo = tempfile::tempdir().expect("repo dir");
-    std::fs::write(repo.path().join("notes.txt"), "a note\n").expect("write notes");
-    let claude = JcodeClaude::new(
+const DECISION: &str = "{\"decision\": \"done\", \"reason\": \"read enough\"}";
+
+fn claude_for(provider: &ReadsUntilToldProvider, repo: &std::path::Path) -> JcodeClaude {
+    std::fs::write(repo.join("notes.txt"), "a note\n").expect("write notes");
+    JcodeClaude::new(
         Arc::new(provider.clone()),
-        repo.path().to_path_buf(),
+        repo.to_path_buf(),
         LoopConfig::default(),
-    );
-    let step = StepSpec {
+    )
+}
+
+fn step() -> StepSpec {
+    StepSpec {
         id: 1,
         task: "Add a test".into(),
         done_when: "the test passes".into(),
-    };
-    let report = HelperReport {
+    }
+}
+
+fn passing_report() -> HelperReport {
+    HelperReport {
         summary: "added the test".into(),
         files_changed: vec!["test_x.py".into()],
         check_command: "pytest -q".into(),
         check_passed: true,
         check_output_tail: "1 passed".into(),
         blocker: String::new(),
-    };
-    let (judgment, _cost) = claude.judge(&step, &report, 1).await;
+    }
+}
+
+async fn judge_with(provider: &ReadsUntilToldProvider) -> super::report::Judgment {
+    let repo = tempfile::tempdir().expect("repo dir");
+    let claude = claude_for(provider, repo.path());
+    let (judgment, _cost) = claude.judge(&step(), &passing_report(), 1).await;
     judgment
 }
 
-// The env lock is held across the judge's awaits on purpose: it keeps other
-// tests from changing JCODE_HOME while a session is being saved.
+// The env lock is held across the sessions' awaits on purpose: it keeps
+// other tests from changing JCODE_HOME while a session is being saved.
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn capped_judge_still_returns_its_decision() {
     let _env = crate::storage::lock_test_env();
     let _home = IsolatedHome::new();
-    let provider = ReadsUntilToldProvider::new(false);
+    let provider = ReadsUntilToldProvider::new(1, DECISION, false);
 
     let judgment = judge_with(&provider).await;
 
@@ -178,10 +204,29 @@ async fn capped_judge_still_returns_its_decision() {
     );
     assert_eq!(judgment.reason, "read enough");
     // 8 reads, 1 refused call carrying "reply now", then the answer.
+    assert_eq!(provider.requests(), config::JUDGE_MAX_TOOL_CALLS + 2);
+}
+
+/// A model that sends many reads in one response must not use up the grace
+/// before it has seen a single refusal. With 6 parallel reads per response,
+/// the second response crosses the cap of 8 with 4 calls to spare; all of
+/// them are refused with "reply now", and the third response answers.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn judge_batching_reads_past_the_cap_still_answers() {
+    let _env = crate::storage::lock_test_env();
+    let _home = IsolatedHome::new();
+    let provider = ReadsUntilToldProvider::new(6, DECISION, false);
+
+    let judgment = judge_with(&provider).await;
+
     assert_eq!(
-        *provider.requests.lock().unwrap(),
-        config::JUDGE_MAX_TOOL_CALLS + 2
+        judgment.decision,
+        super::Outcome::Done,
+        "a batching judge must still answer: {}",
+        judgment.reason
     );
+    assert_eq!(provider.requests(), 3);
 }
 
 #[tokio::test]
@@ -189,7 +234,7 @@ async fn capped_judge_still_returns_its_decision() {
 async fn judge_that_never_stops_reading_is_still_stopped() {
     let _env = crate::storage::lock_test_env();
     let _home = IsolatedHome::new();
-    let provider = ReadsUntilToldProvider::new(true);
+    let provider = ReadsUntilToldProvider::new(1, DECISION, true);
 
     let judgment = judge_with(&provider).await;
 
@@ -199,10 +244,63 @@ async fn judge_that_never_stops_reading_is_still_stopped() {
         "{}",
         judgment.reason
     );
-    // The cap plus the grace, and then the turn is cut off.
-    let requests = *provider.requests.lock().unwrap();
-    assert!(
-        requests <= config::JUDGE_MAX_TOOL_CALLS + config::ANSWER_GRACE_TOOL_CALLS + 1,
-        "{requests} requests"
+    // 8 reads, then one refused response per grace slot, then the call that
+    // stops the session.
+    assert_eq!(
+        provider.requests(),
+        config::JUDGE_MAX_TOOL_CALLS + config::ANSWER_GRACE_RESPONSES + 1
     );
+}
+
+/// The final reviewer gets the same grace: a review that ran out of tool
+/// calls still reaches the user instead of "(no review text)".
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn capped_reviewer_still_returns_its_review() {
+    let _env = crate::storage::lock_test_env();
+    let _home = IsolatedHome::new();
+    let provider = ReadsUntilToldProvider::new(5, "Review: the change looks right.", false);
+    let repo = tempfile::tempdir().expect("repo dir");
+    let claude = claude_for(&provider, repo.path());
+    let log = vec![StepLogEntry {
+        step: step(),
+        report: passing_report(),
+        stopped: false,
+        reason: String::new(),
+    }];
+
+    let (review, _cost) = claude.review("Add a test", &log).await;
+
+    assert_eq!(review, "Review: the change looks right.");
+}
+
+/// A helper keeps the hard stop: its attempt ends at the cap and is reported
+/// as stopped, with no grace for more calls.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn helper_keeps_the_hard_stop_at_its_cap() {
+    let _env = crate::storage::lock_test_env();
+    let _home = IsolatedHome::new();
+    let provider = ReadsUntilToldProvider::new(1, "{}", false);
+    let repo = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo.path().join("notes.txt"), "a note\n").expect("write notes");
+    let claude = JcodeClaude::new(
+        Arc::new(provider.clone()),
+        repo.path().to_path_buf(),
+        LoopConfig {
+            helper_max_tool_calls: 3,
+            ..LoopConfig::default()
+        },
+    );
+
+    let (report, _cost) = claude.run_helper(&step(), "").await;
+
+    assert!(!report.check_passed);
+    assert!(
+        report.blocker.contains("tool-call limit reached (3 calls)"),
+        "{}",
+        report.blocker
+    );
+    // 3 reads, then the 4th call stops the session: no grace response.
+    assert_eq!(provider.requests(), 4);
 }

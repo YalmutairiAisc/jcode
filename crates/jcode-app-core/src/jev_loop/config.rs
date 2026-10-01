@@ -34,11 +34,12 @@ pub const JUDGE_MAX_TOOL_CALLS: u32 = 8;
 pub const REVISE_MAX_TOOL_CALLS: u32 = 15;
 pub const REVIEW_MAX_TOOL_CALLS: u32 = 25;
 pub const PLAN_MAX_TOOL_CALLS: u32 = 40;
-/// Tool calls a read-only planner session may still attempt past its cap.
-/// Each is refused with "reply now with your answer"; the session is stopped
-/// only after these. Capped judges were seen issuing two calls per response,
-/// so this covers one more response's worth plus a margin.
-pub const ANSWER_GRACE_TOOL_CALLS: u32 = 4;
+/// Model responses a read-only planner session may still send past its
+/// tool-call cap. Their tool calls are refused with "reply now with your
+/// answer"; a tool call from a later response stops the session. Counting
+/// responses, not calls, means a response that batches several reads cannot
+/// use up the grace before the model has seen a refusal.
+pub const ANSWER_GRACE_RESPONSES: u32 = 2;
 
 /// Fork log file name. The loop writes it under `~/.jcode/jev-loop/` (not
 /// inside the target repo, where it would dirty the tree the loop edits).
@@ -171,6 +172,11 @@ pub struct LoopConfig {
     pub max_attempts_per_step: u32,
     pub max_revisions_per_step: u32,
     pub helper_max_tool_calls: u32,
+    /// Tool calls for the planner's read-only sessions.
+    pub plan_max_tool_calls: u32,
+    pub judge_max_tool_calls: u32,
+    pub revise_max_tool_calls: u32,
+    pub review_max_tool_calls: u32,
     pub step_budget_usd: f64,
     pub fork_log: PathBuf,
 }
@@ -186,6 +192,10 @@ impl Default for LoopConfig {
             max_attempts_per_step: MAX_ATTEMPTS_PER_STEP,
             max_revisions_per_step: MAX_REVISIONS_PER_STEP,
             helper_max_tool_calls: HELPER_MAX_TOOL_CALLS,
+            plan_max_tool_calls: PLAN_MAX_TOOL_CALLS,
+            judge_max_tool_calls: JUDGE_MAX_TOOL_CALLS,
+            revise_max_tool_calls: REVISE_MAX_TOOL_CALLS,
+            review_max_tool_calls: REVIEW_MAX_TOOL_CALLS,
             step_budget_usd: STEP_BUDGET_USD,
             fork_log: PathBuf::from(FORK_LOG),
         }
@@ -248,6 +258,28 @@ impl LoopConfig {
         if let Some(v) = text("JCODE_JEV_LOOP_HELPER_MAX_TOOL_CALLS")? {
             config.helper_max_tool_calls =
                 parse_positive("JCODE_JEV_LOOP_HELPER_MAX_TOOL_CALLS", &v)?;
+        }
+        for (key, slot) in [
+            (
+                "JCODE_JEV_LOOP_PLAN_MAX_TOOL_CALLS",
+                &mut config.plan_max_tool_calls,
+            ),
+            (
+                "JCODE_JEV_LOOP_JUDGE_MAX_TOOL_CALLS",
+                &mut config.judge_max_tool_calls,
+            ),
+            (
+                "JCODE_JEV_LOOP_REVISE_MAX_TOOL_CALLS",
+                &mut config.revise_max_tool_calls,
+            ),
+            (
+                "JCODE_JEV_LOOP_REVIEW_MAX_TOOL_CALLS",
+                &mut config.review_max_tool_calls,
+            ),
+        ] {
+            if let Some(v) = text(key)? {
+                *slot = parse_positive(key, &v)?;
+            }
         }
         if let Some(v) = text("JCODE_JEV_LOOP_STEP_BUDGET_USD")? {
             let budget: f64 = v.parse().map_err(|_| {

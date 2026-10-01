@@ -316,7 +316,9 @@ async fn guarded_tool_blocks_commands_caps_calls_and_cancels_the_turn() {
 
 /// With an answer grace, the calls just past the cap are refused with an
 /// instruction to answer now, and the turn keeps going so the model can
-/// reply. Only a call past the grace stops the session.
+/// reply. The grace counts model responses: any number of calls in one
+/// response share a slot. A call from a response past the grace stops the
+/// session.
 #[tokio::test]
 async fn answer_grace_refuses_over_cap_calls_without_stopping_then_stops() {
     use super::guard::{GuardedTool, SessionGuard};
@@ -327,26 +329,39 @@ async fn answer_grace_refuses_over_cap_calls_without_stopping_then_stops() {
     let cancel = crate::agent::InterruptSignal::new();
     guard.attach_cancel(cancel.clone());
     let tool = GuardedTool::new(Arc::new(CountingTool(ran.clone())), guard.clone());
+    let in_response = |id: &str| {
+        let mut ctx = tool_ctx();
+        ctx.message_id = id.to_string();
+        ctx
+    };
 
     for _ in 0..2 {
-        tool.execute(json!({"command": "ls"}), tool_ctx())
+        tool.execute(json!({"command": "ls"}), in_response("r1"))
             .await
             .unwrap();
     }
-    for _ in 0..2 {
-        let refusal = tool
-            .execute(json!({"command": "ls"}), tool_ctx())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(refusal.contains("reply now with your answer"), "{refusal}");
-        assert!(!cancel.is_set(), "a grace refusal must not end the turn");
-        assert_eq!(guard.stop_reason(), None);
+    // Response r2 batches five calls past the cap, r3 two more: every one is
+    // refused with "reply now", and none ends the turn.
+    for (response, calls) in [("r2", 5), ("r3", 2)] {
+        for _ in 0..calls {
+            let refusal = tool
+                .execute(json!({"command": "ls"}), in_response(response))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refusal.contains("reply now with your answer"),
+                "{response}: {refusal}"
+            );
+            assert!(!cancel.is_set(), "a grace refusal must not end the turn");
+            assert_eq!(guard.stop_reason(), None);
+        }
     }
     assert_eq!(ran.lock().unwrap().len(), 2, "over-cap calls never run");
 
+    // A third response after the cap is past the grace of 2 responses.
     let over = tool
-        .execute(json!({"command": "ls"}), tool_ctx())
+        .execute(json!({"command": "ls"}), in_response("r4"))
         .await
         .unwrap_err()
         .to_string();

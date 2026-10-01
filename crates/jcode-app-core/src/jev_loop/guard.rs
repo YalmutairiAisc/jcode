@@ -19,14 +19,16 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// Per-session limits and the reason a session was stopped, if it was.
 pub struct SessionGuard {
     max_tool_calls: u32,
-    /// Tool calls refused, without stopping the turn, after the cap is
-    /// reached, so the model can still give its answer (see
+    /// Model responses whose over-cap tool calls are refused, without
+    /// stopping the turn, so the model can still give its answer (see
     /// [`SessionGuard::with_answer_grace`]). Zero means the call over the cap
     /// stops the session at once.
     answer_grace: u32,
     budget_usd: Option<f64>,
     blocked_commands: &'static [&'static [&'static str]],
     tool_calls: AtomicU32,
+    /// Responses (by message id) that have had an over-cap call refused.
+    grace_responses: Mutex<Vec<String>>,
     spent_usd: Mutex<f64>,
     stop_reason: Mutex<Option<String>>,
     cancel: Mutex<Option<crate::agent::InterruptSignal>>,
@@ -44,18 +46,22 @@ impl SessionGuard {
             budget_usd,
             blocked_commands,
             tool_calls: AtomicU32::new(0),
+            grace_responses: Mutex::new(Vec::new()),
             spent_usd: Mutex::new(0.0),
             stop_reason: Mutex::new(None),
             cancel: Mutex::new(None),
         })
     }
 
-    /// Like [`SessionGuard::new`], but once the cap is reached the next
-    /// `grace` tool calls are refused with an instruction to answer now,
-    /// instead of stopping the session. A judge, reviser, planner, or
-    /// reviewer that runs out of tool calls then still returns its decision;
-    /// stopping it outright left the loop with no answer at all. The session
-    /// is stopped only if the model keeps calling tools after the grace.
+    /// Like [`SessionGuard::new`], but once the cap is reached, tool calls
+    /// from the next `grace` model responses are refused with an instruction
+    /// to answer now, instead of stopping the session. A judge, reviser,
+    /// planner, or reviewer that runs out of tool calls then still returns
+    /// its decision; stopping it outright left the loop with no answer at
+    /// all. The grace counts responses, not calls, so a response that
+    /// batches several reads cannot use it all up before the model has seen
+    /// a single refusal. A tool call from a response after the grace stops
+    /// the session.
     pub fn with_answer_grace(
         max_tool_calls: u32,
         grace: u32,
@@ -109,24 +115,25 @@ impl SessionGuard {
 
     /// Admit one tool call, or explain why it may not run. Only calls that
     /// get past the stop check are counted, so `tool_calls` reports the calls
-    /// the session actually attempted.
-    fn admit(&self, tool_name: &str, input: &Value) -> Result<(), String> {
+    /// the session actually attempted. `response_id` identifies the model
+    /// response the call came from (the agent's assistant message id).
+    fn admit(&self, tool_name: &str, input: &Value, response_id: &str) -> Result<(), String> {
         if let Some(reason) = self.stop_reason() {
             return Err(format!("This session was stopped: {reason}."));
         }
         let used = self.tool_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if used > self.max_tool_calls.saturating_add(self.answer_grace) {
+        if used > self.max_tool_calls {
+            if self.grace_allows(response_id) {
+                return Err(format!(
+                    "Tool-call limit reached ({} calls). Do not call any more tools: \
+                     reply now with your answer in the required format, using what \
+                     you have already read.",
+                    self.max_tool_calls
+                ));
+            }
             let reason = format!("tool-call limit reached ({} calls)", self.max_tool_calls);
             self.stop(reason.clone());
             return Err(format!("This session was stopped: {reason}."));
-        }
-        if used > self.max_tool_calls {
-            return Err(format!(
-                "Tool-call limit reached ({} calls). Do not call any more tools: \
-                 reply now with your answer in the required format, using what \
-                 you have already read.",
-                self.max_tool_calls
-            ));
         }
         if tool_name == "bash"
             && let Some(command) = input.get("command").and_then(Value::as_str)
@@ -138,6 +145,25 @@ impl SessionGuard {
             ));
         }
         Ok(())
+    }
+
+    /// Whether an over-cap call from `response_id` gets a refusal that lets
+    /// the turn continue. Every call in a response already in the grace
+    /// does; a new response does only while fewer than `answer_grace`
+    /// responses have used it.
+    fn grace_allows(&self, response_id: &str) -> bool {
+        if self.answer_grace == 0 {
+            return false;
+        }
+        let mut seen = lock(&self.grace_responses);
+        if seen.iter().any(|id| id == response_id) {
+            return true;
+        }
+        if seen.len() < self.answer_grace as usize {
+            seen.push(response_id.to_string());
+            return true;
+        }
+        false
     }
 }
 
@@ -188,7 +214,7 @@ impl Tool for GuardedTool {
     }
 
     async fn execute(&self, mut input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        if let Err(refusal) = self.guard.admit(self.inner.name(), &input) {
+        if let Err(refusal) = self.guard.admit(self.inner.name(), &input, &ctx.message_id) {
             anyhow::bail!(refusal);
         }
         if self.inner.name() != "bash" {

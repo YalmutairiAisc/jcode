@@ -680,6 +680,10 @@ fn config_defaults_match_the_prototype_and_overrides_are_validated() {
     assert_eq!(defaults.max_attempts_per_step, 3);
     assert_eq!(defaults.max_revisions_per_step, 1);
     assert_eq!(defaults.helper_max_tool_calls, 40);
+    assert_eq!(defaults.plan_max_tool_calls, 40);
+    assert_eq!(defaults.judge_max_tool_calls, 8);
+    assert_eq!(defaults.revise_max_tool_calls, 15);
+    assert_eq!(defaults.review_max_tool_calls, 25);
     assert_eq!(defaults.step_budget_usd, 2.0);
 
     let env = |pairs: &'static [(&'static str, &'static str)]| {
@@ -694,18 +698,35 @@ fn config_defaults_match_the_prototype_and_overrides_are_validated() {
         env(&[
             ("JCODE_JEV_LOOP_THRESHOLD", "0.7"),
             ("JCODE_JEV_LOOP_MAX_ATTEMPTS", "5"),
+            ("JCODE_JEV_LOOP_PLAN_MAX_TOOL_CALLS", "11"),
+            ("JCODE_JEV_LOOP_JUDGE_MAX_TOOL_CALLS", "2"),
+            ("JCODE_JEV_LOOP_REVISE_MAX_TOOL_CALLS", "3"),
+            ("JCODE_JEV_LOOP_REVIEW_MAX_TOOL_CALLS", " 4 "),
         ]),
         "/tmp/f.jsonl".into(),
     )
     .unwrap();
     assert_eq!(tuned.jev_confidence_threshold, 0.7);
     assert_eq!(tuned.max_attempts_per_step, 5);
+    assert_eq!(
+        (
+            tuned.plan_max_tool_calls,
+            tuned.judge_max_tool_calls,
+            tuned.revise_max_tool_calls,
+            tuned.review_max_tool_calls
+        ),
+        (11, 2, 3, 4)
+    );
     assert_eq!(tuned.fork_log, std::path::PathBuf::from("/tmp/f.jsonl"));
 
     for bad in [
         &[("JCODE_JEV_LOOP_THRESHOLD", "1.5")][..],
         &[("JCODE_JEV_LOOP_MAX_ATTEMPTS", "0")][..],
         &[("JCODE_JEV_LOOP_STEP_BUDGET_USD", "-1")][..],
+        &[("JCODE_JEV_LOOP_JUDGE_MAX_TOOL_CALLS", "0")][..],
+        &[("JCODE_JEV_LOOP_REVIEW_MAX_TOOL_CALLS", "many")][..],
+        &[("JCODE_JEV_LOOP_PLAN_MAX_TOOL_CALLS", "-3")][..],
+        &[("JCODE_JEV_LOOP_REVISE_MAX_TOOL_CALLS", "2.5")][..],
     ] {
         assert!(
             LoopConfig::from_lookup(env(bad), "f".into()).is_err(),
