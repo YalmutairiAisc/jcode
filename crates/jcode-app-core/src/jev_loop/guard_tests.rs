@@ -354,6 +354,138 @@ async fn loop_shell_commands_run_without_cloud_or_github_logins() {
     );
 }
 
+/// Git hands a loop command no password over HTTPS. Without the isolation
+/// lines, a `store` credential helper (plain, URL-scoped, or passed down by a
+/// parent's `git -c`), an inherited `GIT_ASKPASS` or `SSH_ASKPASS` program,
+/// and `core.askPass` each give one out; with them, none does. A
+/// `GIT_CONFIG_COUNT` entry the parent set keeps working, and a command's own
+/// `GIT_ASKPASS` still applies.
+#[cfg(unix)]
+#[test]
+fn git_hands_loop_commands_no_password() {
+    use super::guard::hide_credentials;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+    std::fs::write(
+        path("store"),
+        "https://someone:stored-secret@git.example.invalid\n",
+    )
+    .expect("write credential store");
+    let askpass = path("askpass.sh");
+    std::fs::write(&askpass, "#!/bin/sh\necho askpass-secret\n").expect("write askpass");
+    std::process::Command::new("chmod")
+        .args(["+x", &askpass])
+        .status()
+        .expect("chmod askpass");
+    let store_helper = format!("store --file={}", path("store"));
+    let write_config = |name: &str, body: String| {
+        std::fs::write(path(name), body).expect("write git config");
+        path(name)
+    };
+    let plain = write_config(
+        "plain",
+        format!("[credential]\n\thelper = {store_helper}\n"),
+    );
+    let scoped = write_config(
+        "scoped",
+        format!("[credential \"https://git.example.invalid\"]\n\thelper = {store_helper}\n"),
+    );
+    let core = write_config("core", format!("[core]\n\taskPass = {askpass}\n"));
+
+    // Prints the password git would send for the host, or nothing.
+    let fill = "printf 'protocol=https\\nhost=git.example.invalid\\n\\n' \
+        | git credential fill 2>/dev/null | sed -n 's/^password=//p'";
+    let run = |command: &str, isolate: bool, global: &str, extra: &[(&str, &str)]| {
+        let mut input = json!({ "command": command });
+        if isolate {
+            hide_credentials(&mut input);
+        }
+        let mut shell = std::process::Command::new("bash");
+        shell
+            .arg("-c")
+            .arg(input["command"].as_str().unwrap())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", global)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_ASKPASS")
+            .env_remove("SSH_ASKPASS")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS");
+        for (key, value) in extra {
+            shell.env(key, value);
+        }
+        let output = shell.output().expect("bash runs");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    // What a parent's `git -c credential.helper=...` exports to children.
+    let passed_down = format!("'credential.helper'='{store_helper}'");
+
+    for (case, global, extra, secret) in [
+        ("store helper", plain.as_str(), &[][..], "stored-secret"),
+        (
+            "URL-scoped store helper",
+            scoped.as_str(),
+            &[][..],
+            "stored-secret",
+        ),
+        (
+            "helper passed down by git -c",
+            "/dev/null",
+            &[("GIT_CONFIG_PARAMETERS", passed_down.as_str())][..],
+            "stored-secret",
+        ),
+        ("core.askPass", core.as_str(), &[][..], "askpass-secret"),
+        (
+            "inherited GIT_ASKPASS",
+            "/dev/null",
+            &[("GIT_ASKPASS", askpass.as_str())][..],
+            "askpass-secret",
+        ),
+        (
+            "inherited SSH_ASKPASS",
+            "/dev/null",
+            &[("SSH_ASKPASS", askpass.as_str())][..],
+            "askpass-secret",
+        ),
+    ] {
+        assert_eq!(
+            run(fill, false, global, extra),
+            secret,
+            "{case}, no isolation"
+        );
+        assert_eq!(run(fill, true, global, extra), "", "{case}, isolated");
+    }
+
+    // The parent's own GIT_CONFIG_COUNT entry survives the added ones.
+    let marker = [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "jevtest.marker"),
+        ("GIT_CONFIG_VALUE_0", "kept"),
+    ];
+    assert_eq!(
+        run(
+            "git config --get jevtest.marker",
+            true,
+            "/dev/null",
+            &marker
+        ),
+        "kept"
+    );
+    // A command that sets its own askpass still gets it. `export` because a
+    // plain `VAR=x` prefix would reach only `printf`, the pipeline's first
+    // command.
+    assert_eq!(
+        run(
+            &format!("export GIT_ASKPASS={askpass}; {fill}"),
+            true,
+            "/dev/null",
+            &[]
+        ),
+        "askpass-secret"
+    );
+}
+
 /// End to end through the guard, as a loop helper's shell command runs: a
 /// script sees none of the machine's AWS settings, even when the parent
 /// process points at a real profile file. The inner tool runs the command

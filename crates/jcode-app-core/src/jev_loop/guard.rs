@@ -184,16 +184,29 @@ impl Tool for GuardedTool {
 /// GitHub, Kubernetes, Google Cloud, and Azure tools and SDKs at empty
 /// configuration and drop credential variables, so a program the blocked list
 /// cannot see (`bash deploy.sh`, `boto3`, `terraform` started from Python)
-/// finds no login to act with.
+/// finds no login to act with. Git gets no password either: an empty
+/// `credential.helper` entry (git's documented way to reset the list) turns
+/// off every configured helper (`store`, `cache`, Git Credential Manager,
+/// `gh`), the askpass programs are dropped, and git fails instead of
+/// prompting. The two git entries are added after any `GIT_CONFIG_COUNT`
+/// entries the parent already set, so those keep working. Settings a parent
+/// passed down with `git -c` (`GIT_CONFIG_PARAMETERS`) are dropped, because
+/// git applies them after these entries and they could turn a helper back on.
 const CREDENTIAL_ISOLATION: &str = "\
 unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
 AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
 AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
 AWS_CONTAINER_AUTHORIZATION_TOKEN GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN \
-GITHUB_ENTERPRISE_TOKEN GOOGLE_APPLICATION_CREDENTIALS
+GITHUB_ENTERPRISE_TOKEN GOOGLE_APPLICATION_CREDENTIALS GIT_ASKPASS SSH_ASKPASS \
+GIT_CONFIG_PARAMETERS
 export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
 AWS_EC2_METADATA_DISABLED=true GH_CONFIG_DIR=/dev/null/gh KUBECONFIG=/dev/null \
-CLOUDSDK_CONFIG=/dev/null/gcloud AZURE_CONFIG_DIR=/dev/null/azure";
+CLOUDSDK_CONFIG=/dev/null/gcloud AZURE_CONFIG_DIR=/dev/null/azure GIT_TERMINAL_PROMPT=0
+__jev_n=${GIT_CONFIG_COUNT:-0}
+export \"GIT_CONFIG_KEY_$__jev_n=credential.helper\" \"GIT_CONFIG_VALUE_$__jev_n=\" \
+\"GIT_CONFIG_KEY_$((__jev_n + 1))=core.askPass\" \"GIT_CONFIG_VALUE_$((__jev_n + 1))=\" \
+GIT_CONFIG_COUNT=$((__jev_n + 2))
+unset __jev_n";
 
 /// Run a loop shell command without this machine's cloud and GitHub logins.
 /// Values the command sets itself (`AWS_ACCESS_KEY_ID=test pytest`) still
