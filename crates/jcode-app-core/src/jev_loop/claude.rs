@@ -133,11 +133,7 @@ impl JcodeClaude {
         prompt: &str,
     ) -> Result<SessionResult> {
         let provider = self.provider.fork();
-        let guard = SessionGuard::new(
-            spec.max_tool_calls,
-            spec.budget_usd,
-            config::BLOCKED_COMMANDS,
-        );
+        let guard = session_guard(spec);
         let registry = guarded_registry(provider.clone(), spec.tools, &guard).await;
         let allowed: HashSet<String> = spec.tools.iter().map(|tool| tool.to_string()).collect();
         let mut session =
@@ -332,6 +328,25 @@ impl ClaudeCalls for JcodeClaude {
         };
         (text, result.cost_usd)
     }
+}
+
+/// The guard for one session. Read-only planner sessions (plan, judge,
+/// revise, review) get a short final-answer grace past their tool-call cap:
+/// the over-cap calls are refused with an instruction to answer, so the loop
+/// still receives a decision. A helper keeps the hard stop: it edits files,
+/// and its attempt is reported as stopped, which the judge already handles.
+fn session_guard(spec: &SessionSpec<'_>) -> Arc<SessionGuard> {
+    let grace = if spec.role == "helper" {
+        0
+    } else {
+        config::ANSWER_GRACE_TOOL_CALLS
+    };
+    SessionGuard::with_answer_grace(
+        spec.max_tool_calls,
+        grace,
+        spec.budget_usd,
+        config::BLOCKED_COMMANDS,
+    )
 }
 
 /// A registry holding only `tools`, each wrapped by the session guard.

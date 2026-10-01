@@ -34,6 +34,11 @@ pub const JUDGE_MAX_TOOL_CALLS: u32 = 8;
 pub const REVISE_MAX_TOOL_CALLS: u32 = 15;
 pub const REVIEW_MAX_TOOL_CALLS: u32 = 25;
 pub const PLAN_MAX_TOOL_CALLS: u32 = 40;
+/// Tool calls a read-only planner session may still attempt past its cap.
+/// Each is refused with "reply now with your answer"; the session is stopped
+/// only after these. Capped judges were seen issuing two calls per response,
+/// so this covers one more response's worth plus a margin.
+pub const ANSWER_GRACE_TOOL_CALLS: u32 = 4;
 
 /// Fork log file name. The loop writes it under `~/.jcode/jev-loop/` (not
 /// inside the target repo, where it would dirty the tree the loop edits).

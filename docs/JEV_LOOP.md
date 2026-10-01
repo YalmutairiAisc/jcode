@@ -136,7 +136,10 @@ Invalid values are rejected at startup instead of being ignored.
   either is hit, the attempt is stopped mid-turn and reported as a failure.
   The planner's read-only sessions have fixed tool-call caps too: judge 8,
   revise 15, and review 25 match the prototype's `max_turns`; the plan cap
-  of 40 is new (the prototype's planner had none).
+  of 40 is new (the prototype's planner had none). When a read-only session
+  reaches its cap, its next 4 tool calls are refused with "reply now with
+  your answer" instead of ending the turn, so a judge that ran out of reads
+  still returns its decision. It is stopped only if it keeps calling tools.
 - Every session is told to leave changes uncommitted (no commits, branches,
   tags, stashes, or git config changes). The prototype got this from Claude
   Code's system prompt; here it is stated explicitly, because the loop's

@@ -314,6 +314,51 @@ async fn guarded_tool_blocks_commands_caps_calls_and_cancels_the_turn() {
     assert_eq!(ran.lock().unwrap().len(), 2);
 }
 
+/// With an answer grace, the calls just past the cap are refused with an
+/// instruction to answer now, and the turn keeps going so the model can
+/// reply. Only a call past the grace stops the session.
+#[tokio::test]
+async fn answer_grace_refuses_over_cap_calls_without_stopping_then_stops() {
+    use super::guard::{GuardedTool, SessionGuard};
+    use crate::tool::Tool;
+
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let guard = SessionGuard::with_answer_grace(2, 2, None, BLOCKED_COMMANDS);
+    let cancel = crate::agent::InterruptSignal::new();
+    guard.attach_cancel(cancel.clone());
+    let tool = GuardedTool::new(Arc::new(CountingTool(ran.clone())), guard.clone());
+
+    for _ in 0..2 {
+        tool.execute(json!({"command": "ls"}), tool_ctx())
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let refusal = tool
+            .execute(json!({"command": "ls"}), tool_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("reply now with your answer"), "{refusal}");
+        assert!(!cancel.is_set(), "a grace refusal must not end the turn");
+        assert_eq!(guard.stop_reason(), None);
+    }
+    assert_eq!(ran.lock().unwrap().len(), 2, "over-cap calls never run");
+
+    let over = tool
+        .execute(json!({"command": "ls"}), tool_ctx())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(over.contains("tool-call limit reached (2 calls)"), "{over}");
+    assert!(cancel.is_set(), "past the grace the turn is stopped");
+    assert_eq!(
+        guard.stop_reason().as_deref(),
+        Some("tool-call limit reached (2 calls)")
+    );
+    assert_eq!(ran.lock().unwrap().len(), 2);
+}
+
 /// Loop shell commands run without this machine's cloud and GitHub logins,
 /// while values a command sets itself still apply.
 #[cfg(unix)]

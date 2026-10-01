@@ -19,6 +19,11 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// Per-session limits and the reason a session was stopped, if it was.
 pub struct SessionGuard {
     max_tool_calls: u32,
+    /// Tool calls refused, without stopping the turn, after the cap is
+    /// reached, so the model can still give its answer (see
+    /// [`SessionGuard::with_answer_grace`]). Zero means the call over the cap
+    /// stops the session at once.
+    answer_grace: u32,
     budget_usd: Option<f64>,
     blocked_commands: &'static [&'static [&'static str]],
     tool_calls: AtomicU32,
@@ -35,6 +40,7 @@ impl SessionGuard {
     ) -> Arc<Self> {
         Arc::new(Self {
             max_tool_calls,
+            answer_grace: 0,
             budget_usd,
             blocked_commands,
             tool_calls: AtomicU32::new(0),
@@ -42,6 +48,25 @@ impl SessionGuard {
             stop_reason: Mutex::new(None),
             cancel: Mutex::new(None),
         })
+    }
+
+    /// Like [`SessionGuard::new`], but once the cap is reached the next
+    /// `grace` tool calls are refused with an instruction to answer now,
+    /// instead of stopping the session. A judge, reviser, planner, or
+    /// reviewer that runs out of tool calls then still returns its decision;
+    /// stopping it outright left the loop with no answer at all. The session
+    /// is stopped only if the model keeps calling tools after the grace.
+    pub fn with_answer_grace(
+        max_tool_calls: u32,
+        grace: u32,
+        budget_usd: Option<f64>,
+        blocked_commands: &'static [&'static [&'static str]],
+    ) -> Arc<Self> {
+        let mut guard = Self::new(max_tool_calls, budget_usd, blocked_commands);
+        if let Some(guard) = Arc::get_mut(&mut guard) {
+            guard.answer_grace = grace;
+        }
+        guard
     }
 
     /// Wire the owning agent's cancel signal so a violation ends the turn.
@@ -90,10 +115,18 @@ impl SessionGuard {
             return Err(format!("This session was stopped: {reason}."));
         }
         let used = self.tool_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if used > self.max_tool_calls {
+        if used > self.max_tool_calls.saturating_add(self.answer_grace) {
             let reason = format!("tool-call limit reached ({} calls)", self.max_tool_calls);
             self.stop(reason.clone());
             return Err(format!("This session was stopped: {reason}."));
+        }
+        if used > self.max_tool_calls {
+            return Err(format!(
+                "Tool-call limit reached ({} calls). Do not call any more tools: \
+                 reply now with your answer in the required format, using what \
+                 you have already read.",
+                self.max_tool_calls
+            ));
         }
         if tool_name == "bash"
             && let Some(command) = input.get("command").and_then(Value::as_str)
