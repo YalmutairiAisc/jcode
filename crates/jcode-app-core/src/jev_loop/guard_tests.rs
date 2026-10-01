@@ -374,6 +374,48 @@ async fn answer_grace_refuses_over_cap_calls_without_stopping_then_stops() {
     assert_eq!(ran.lock().unwrap().len(), 2);
 }
 
+/// A tool path that labels every call with the same id (the session id, as
+/// the native-tool bridge does) must still end a session that keeps calling
+/// tools: the grace has a fixed ceiling on refused calls.
+#[tokio::test]
+async fn answer_grace_stops_endless_calls_that_share_one_id() {
+    use super::guard::{GuardedTool, SessionGuard};
+    use crate::tool::Tool;
+
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let guard = SessionGuard::with_answer_grace(1, 2, None, BLOCKED_COMMANDS);
+    let cancel = crate::agent::InterruptSignal::new();
+    guard.attach_cancel(cancel.clone());
+    let tool = GuardedTool::new(Arc::new(CountingTool(ran.clone())), guard.clone());
+
+    tool.execute(json!({"command": "ls"}), tool_ctx())
+        .await
+        .unwrap();
+    let mut refused = 0;
+    for _ in 0..200 {
+        let error = tool
+            .execute(json!({"command": "ls"}), tool_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        if error.contains("reply now with your answer") {
+            refused += 1;
+            continue;
+        }
+        assert!(
+            error.contains("tool-call limit reached (1 calls)"),
+            "{error}"
+        );
+        break;
+    }
+    assert!(cancel.is_set(), "the session must be stopped in the end");
+    assert!(
+        (1..=24).contains(&refused),
+        "{refused} refusals before the stop"
+    );
+    assert_eq!(ran.lock().unwrap().len(), 1);
+}
+
 /// Loop shell commands run without this machine's cloud and GitHub logins,
 /// while values a command sets itself still apply.
 #[cfg(unix)]

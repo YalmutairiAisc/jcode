@@ -29,6 +29,8 @@ pub struct SessionGuard {
     tool_calls: AtomicU32,
     /// Responses (by message id) that have had an over-cap call refused.
     grace_responses: Mutex<Vec<String>>,
+    /// Over-cap calls refused during the grace, across all responses.
+    grace_calls: AtomicU32,
     spent_usd: Mutex<f64>,
     stop_reason: Mutex<Option<String>>,
     cancel: Mutex<Option<crate::agent::InterruptSignal>>,
@@ -47,6 +49,7 @@ impl SessionGuard {
             blocked_commands,
             tool_calls: AtomicU32::new(0),
             grace_responses: Mutex::new(Vec::new()),
+            grace_calls: AtomicU32::new(0),
             spent_usd: Mutex::new(0.0),
             stop_reason: Mutex::new(None),
             cancel: Mutex::new(None),
@@ -150,9 +153,16 @@ impl SessionGuard {
     /// Whether an over-cap call from `response_id` gets a refusal that lets
     /// the turn continue. Every call in a response already in the grace
     /// does; a new response does only while fewer than `answer_grace`
-    /// responses have used it.
+    /// responses have used it. A fixed ceiling on refused calls backs this
+    /// up: some tool paths label every call with the session id instead of
+    /// the response, and without the ceiling a model calling tools forever
+    /// on such a path would never be stopped.
     fn grace_allows(&self, response_id: &str) -> bool {
         if self.answer_grace == 0 {
+            return false;
+        }
+        let refused = self.grace_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if refused > GRACE_REFUSAL_CEILING {
             return false;
         }
         let mut seen = lock(&self.grace_responses);
@@ -166,6 +176,13 @@ impl SessionGuard {
         false
     }
 }
+
+/// Most over-cap calls refused with "reply now" before the session is
+/// stopped, whatever response they came from. Large enough for a response
+/// that batches many reads (a real planner sent 9 at once), small enough to
+/// end a session that keeps calling tools on a path where every call carries
+/// the same message id.
+const GRACE_REFUSAL_CEILING: u32 = 24;
 
 /// Dollars with cents, or more digits for sub-cent amounts so a tiny budget
 /// never reads as `$0.00 of $0.00`.
