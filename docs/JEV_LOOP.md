@@ -52,7 +52,11 @@ jcode jev-loop --repo ~/code/myproject --task "..." --no-jev
 
 Run both on the same task (reset the repo between runs) and compare the cost
 lines in the summary. The exit code is `0` when every step finished and `2`
-when the run stopped for you to decide.
+when the run stopped for you to decide. A mistyped command line (for example
+a missing `--task`) also exits `2`, before anything runs, so a script should
+treat `2` as "stopped for you" only when the output contains the
+`--- run summary ---` block. Any other error, such as a repository path that
+does not exist or a malformed `JCODE_JEV_LOOP_*` value, exits `1`.
 
 Name the check command exactly as it must run, including the interpreter,
 for example `.venv/bin/python -m pytest -q tests/test_x.py` rather than
