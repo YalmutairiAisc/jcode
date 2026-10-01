@@ -159,10 +159,12 @@ Invalid values are rejected at startup instead of being ignored.
 - Costs are estimated from token usage at public per-token prices. On a
   subscription (OAuth) route nothing is billed per token, but the numbers are
   still the right way to compare a Jev run against a `--no-jev` baseline.
-- Every planner, helper, judge, reviser, and reviewer call is an ordinary
-  jcode session titled `jev-loop <role>`, saved with its full transcript, so
-  you can inspect exactly what each one did (for example with
-  `jcode --resume <session>`).
+- Every planner, helper, judge, reviser, and reviewer call is a jcode
+  session titled `jev-loop <role>`, saved with its full transcript, so you
+  can inspect exactly what each one did (for example with
+  `jcode --resume <session>`). They are marked as internal sessions, like
+  ambient cycles: hidden from the session picker until you show test
+  sessions, and left out of the model-usage history.
 
 ## Safety note
 

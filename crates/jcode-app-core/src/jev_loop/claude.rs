@@ -154,6 +154,11 @@ impl JcodeClaude {
             ));
         }
         agent.set_memory_enabled(false);
+        // Loop sessions are internal workers, like ambient cycles: keep them
+        // out of the session picker's default list, the model-usage history
+        // that ranks models in /model, and ambient's recent-session context.
+        // They stay on disk and resumable by name.
+        agent.set_debug(true);
         agent.set_system_prompt(&system_prompt(&spec.rules, &self.repo));
         guard.attach_cancel(agent.graceful_shutdown_signal());
 
