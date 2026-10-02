@@ -268,6 +268,33 @@ Invalid values are rejected at startup instead of being ignored.
   ambient cycles: hidden from the session picker until you show test
   sessions, and left out of the model-usage history.
 
+## Stopping a run
+
+Ctrl+C ends the loop, but not every command it started. Each helper command
+runs in a session of its own, and the loop's own check runs in a process
+group of its own, so neither receives the terminal's Ctrl+C. Measured on
+Linux with the real binary: after Ctrl+C a child left in the loop's process
+group stopped, while a child in its own group and one in its own session both
+kept running and writing. `kill` on the loop's process ID alone is worse: it
+stops only the loop. A long test suite or build can therefore outlive the
+loop, still using CPU and disk.
+
+To stop everything, collect the loop's processes while the loop is still
+running, then signal them all:
+
+```bash
+setsid --wait jcode jev-loop --repo ~/code/myproject --task "..."
+# elsewhere, with LOOP set to the loop's process ID, list every descendant
+# of LOOP (follow ppid links down from LOOP) plus every process whose sid is LOOP:
+ps -eo pid=,ppid=,sid=
+```
+
+`kill -TERM` every process in that list, then `kill -KILL` any still running
+a few seconds later. Order matters: a helper command has its own session, so
+once the loop has exited it is reparented and nothing links it to the loop
+any more. Processes that stayed in the loop's session (what `setsid --wait`
+adds) remain findable by session ID even then.
+
 ## Safety note
 
 Helpers can edit files and run shell commands in the repo without asking.
