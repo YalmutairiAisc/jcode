@@ -171,7 +171,11 @@ Invalid values are rejected at startup instead of being ignored.
 - A step is never accepted unless the loop itself saw its check pass. The
   prototype trusted the helper's `check_passed`; the port runs the check
   command again and decides on that. Only an attempt whose check passed
-  ever reaches Jev or the Opus judge.
+  ever reaches Jev or the Opus judge. The command is still the helper's own,
+  so a helper can weaken it (for example by setting, inside the command, an
+  environment variable the tests depend on). The loop runs exactly what was
+  reported, and the Jev or Opus review sees that command; `--rules-only`
+  has no review, so it accepts whatever command passes.
 - The loop's run of a check gets the same protections as a helper's own
   commands: the blocked-command list below, no cloud or GitHub logins (see
   the safety note), jcode's destructive-command gate (a check it would hold
