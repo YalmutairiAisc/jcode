@@ -609,7 +609,7 @@ fn spawn_detached_progress_follower(task_id: String, output_file: std::path::Pat
 }
 
 #[cfg(not(windows))]
-fn tool_scratch_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn tool_scratch_dir() -> Option<std::path::PathBuf> {
     let dir = std::env::var_os("JCODE_SCRATCH_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)

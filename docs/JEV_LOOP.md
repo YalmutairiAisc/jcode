@@ -1,11 +1,46 @@
 # jev-loop
 
 `jcode jev-loop` is a coding-agent loop with a Jev fork layer, ported from the
-`jev-loop` Python prototype (slices 1 and 2) into jcode itself.
+`jev-loop` Python prototype (slices 1 to 3) into jcode itself.
 
-Opus plans, Sonnet helpers do each step, and Jev settles the small decisions
-in between. When Jev is confident ("sharp"), code acts on its answer. When it
-isn't ("split"), Opus decides.
+Opus plans and Sonnet helpers do each step. After each attempt the loop runs
+the helper's check command itself, and rules in code settle the obvious
+cases. When the check passed, Jev reviews the change against the step's
+`done_when`: when Jev is confident it is met ("sharp"), code accepts the
+step, and otherwise ("split") Opus decides. Jev also picks the files the
+planner and each helper should start from.
+
+## How a step is decided
+
+1. The helper makes one attempt and reports, including the command that
+   checks its work.
+2. The loop runs that check command itself, from the repository root (see
+   "Rules that live in code" for the protections). What the loop sees
+   outranks what the helper claimed; a disagreement is logged and counted.
+3. Rules settle every attempt whose check did not pass, with no model:
+   - the tool-call or spending cap stopped the helper: escalate;
+   - the helper reported a blocker: escalate;
+   - the check failed, the loop could not run it, or the session failed
+     (for example the provider was overloaded): retry, with the loop's own
+     output as feedback;
+   - the same error as the previous attempt (numbers such as timings and
+     line numbers are ignored when comparing): escalate;
+   - the attempt cap: escalate.
+4. A check the loop saw pass goes to review. Jev answers one yes/no
+   question: does the change (the step's diff, new files included, and the
+   check's output) do what the step asks and meet every part of
+   `done_when`? At or above the threshold, code accepts the step. Below it,
+   or when Jev leans towards no, the Opus judge decides, with the same diff
+   in hand.
+5. Escalation asks Opus to rewrite the step once, then the run stops for
+   you.
+
+Before planning, and before each step, Jev also picks files: a keyword
+search over the repository's files (`git ls-files`, with the task's paths and
+identifiers searched for in file contents) finds up to 24 candidates, Jev
+answers "will this task need this file?" for each, and the likely ones are
+named in the planner's or helper's prompt as a place to start. A failed pick
+leaves the prompt unchanged.
 
 ## What runs where
 
@@ -15,6 +50,8 @@ isn't ("split"), Opus decides.
 | The loop | `loop.py` | `jev_loop/engine.rs` |
 | Claude calls | `claude_calls.py` (Claude Agent SDK) | `jev_loop/claude.rs` (jcode's own agent runtime) |
 | Fork layer | `jev_layer.py` (`typesafe-sdk`) | `jev_loop/fork.rs` (jcode's native Jev client) |
+| File picks | planned for slice 3 | `jev_loop/pick.rs` |
+| Check runs, diffs, file search | none (the helper's word) | `jev_loop/workspace.rs` |
 | Structured output | SDK `output_format` | `jev_loop/report.rs` (validated JSON reply) |
 | Blocked commands | SDK `disallowed_tools` | `jev_loop/guard.rs` (enforced in code on every tool call) |
 | CLI | `python loop.py` | `jcode jev-loop` (`src/cli/jev_loop.rs`) |
@@ -44,42 +81,66 @@ Working on a new branch is even better.
 jcode jev-loop --repo ~/code/myproject --task "Add rate limiting to the login endpoint"
 ```
 
-Baseline for comparison (every fork goes to Opus, Jev is never called):
+Two baselines for comparison. Both keep the rules and the loop's own check
+runs, and neither calls Jev:
 
 ```bash
+# Opus reviews every step whose check passed
 jcode jev-loop --repo ~/code/myproject --task "..." --no-jev
+# No review at all: a step is done when the loop sees its check pass
+jcode jev-loop --repo ~/code/myproject --task "..." --rules-only
 ```
 
-Run both on the same task (reset the repo between runs) and compare the cost
-lines in the summary. The exit code is `0` when every step finished and `2`
+Run each on the same task (reset the repo between runs) and compare the
+summaries: `--rules-only` shows what the rules alone achieve, `--no-jev`
+what an Opus review adds, and the default what Jev adds for its cost. The
+exit code is `0` when every step finished and `2`
 when the run stopped for you to decide. A mistyped command line (for example
-a missing `--task`) also exits `2`, before anything runs, so a script should
+a missing `--task`, or `--no-jev` with `--rules-only`) also exits `2`, before
+anything runs, so a script should
 treat `2` as "stopped for you" only when the output contains the
 `--- run summary ---` block. Any other error, such as a repository path that
 does not exist or a malformed `JCODE_JEV_LOOP_*` value, exits `1`.
 
 Name the check command exactly as it must run, including the interpreter,
 for example `.venv/bin/python -m pytest -q tests/test_x.py` rather than
-`python -m pytest`. Helper commands can run in a login shell, which reapplies
-your shell profile's `PATH`, so a virtualenv activated before starting the
-loop is not guaranteed to be first on `PATH` for the helpers.
+`python -m pytest`. Helper commands, and the loop's own run of each check,
+use a login shell, which reapplies your shell profile's `PATH`, so a
+virtualenv activated before starting the loop is not guaranteed to be first
+on `PATH`. Helpers are told the loop reruns their check from the repository
+root, so they report one complete command; a check the loop cannot run is
+never accepted.
 
 ## Reading the fork log
 
-Every fork is appended to `~/.jcode/jev-loop/forks.jsonl` (one JSON line per
-fork; set `JCODE_JEV_LOOP_FORK_LOG` to change it). It lives outside the
-target repo so the loop never dirties the tree it is editing. The fields that
-matter:
+Every fork and file pick is appended to `~/.jcode/jev-loop/forks.jsonl` (one
+JSON line each; set `JCODE_JEV_LOOP_FORK_LOG` to change it). It lives
+outside the target repo so the loop never dirties the tree it is editing.
+For forks, the fields that matter:
 
-- `answer` and `confidence`: what Jev said and how sure it was
-- `route`: `sharp` (code acted) or `split` (Opus decided)
+- `name`: `step_rule` (a rule settled it) or `step_review` (a passing check
+  was reviewed)
+- `check`, `helper_said_passed`, and `loop_check`: what the loop's own run
+  of the check showed (`passed`, `failed`, or `unverified` when it could not
+  run it), what the helper claimed, and the run's exit code, time, and
+  output end
+- `answer` and `confidence`: what Jev said (`meets` or `falls_short`) and
+  how sure it was
+- `route`: `rule` (no model), `sharp` (Jev accepted the step), or `split`
+  (Opus decided)
 - `final_decision` and `decided_by`: what actually happened, and who decided
   (`jev`, `opus`, or `rule`)
-- `note`: when a rule overruled Jev, or Jev was unreachable
+- `reason`: why a rule or Opus decided what it did
+- `note`: why Jev did not settle a review (unsure, doubtful, or unreachable)
 
-Tuning the threshold: look at split forks where Opus agreed with Jev's answer.
-If Opus keeps agreeing at, say, 0.7, lower the threshold toward 0.7 and save
-those Opus calls. If a sharp answer ever turned out wrong, raise it.
+File picks have `name` `file_pick`, the `step` (0 is the planner), the
+number of `candidates`, the `files` suggested, and Jev's probability for
+every candidate in `scores`.
+
+Tuning the threshold: look at split reviews where Opus accepted a step Jev
+leaned towards accepting. If Opus keeps agreeing at, say, 0.7, lower the
+threshold toward 0.7 and save those Opus calls. If Jev ever accepted a step
+that turned out wrong, raise it.
 
 ## Settings
 
@@ -100,17 +161,28 @@ Defaults match the prototype's `config.py`. Override without rebuilding:
 | `JCODE_JEV_LOOP_REVISE_MAX_TOOL_CALLS` | `15` |
 | `JCODE_JEV_LOOP_REVIEW_MAX_TOOL_CALLS` | `25` |
 | `JCODE_JEV_LOOP_STEP_BUDGET_USD` | `2.00` |
+| `JCODE_JEV_LOOP_CHECK_TIMEOUT_SECS` | `600` |
 | `JCODE_JEV_LOOP_FORK_LOG` | `~/.jcode/jev-loop/forks.jsonl` |
 
 Invalid values are rejected at startup instead of being ignored.
 
 ## Rules that live in code (not in prompts)
 
-- A step is never accepted as done if its check failed. If Jev says done,
-  the fork goes to Opus instead; if Opus says done, code turns it into a
-  retry. Both count as rule overrides. (The prototype's code only enforced
-  this against Jev; the port enforces the README's rule for both.)
-- After `MAX_ATTEMPTS_PER_STEP` tries, a step is escalated no matter what.
+- A step is never accepted unless the loop itself saw its check pass. The
+  prototype trusted the helper's `check_passed`; the port runs the check
+  command again and decides on that. Only an attempt whose check passed
+  ever reaches Jev or the Opus judge.
+- The loop's run of a check gets the same protections as a helper's own
+  commands: the blocked-command list below, no cloud or GitHub logins (see
+  the safety note), jcode's destructive-command gate (a check it would hold
+  is not run, and never with a justification), a time limit
+  (`JCODE_JEV_LOOP_CHECK_TIMEOUT_SECS`, after which the check and every
+  process it started are killed), and the repository root as its working
+  directory.
+- Failed checks, blockers, stopped attempts, and repeated errors are settled
+  by the rules in "How a step is decided", not by a model.
+- After `MAX_ATTEMPTS_PER_STEP` tries, a step is escalated no matter what,
+  including when Opus says retry (a rule override).
 - Opus may rewrite a stuck step once, then the run stops for you to decide.
 - Blocked commands are refused for every session. The prototype's list
   (`git push`, `git reset --hard`, `git clean`, `rm -rf`, `sudo`) is extended
@@ -150,12 +222,19 @@ Invalid values are rejected at startup instead of being ignored.
   tags, stashes, or git config changes). The prototype got this from Claude
   Code's system prompt; here it is stated explicitly, because the loop's
   "review with `git diff`, undo with git" model depends on it.
-- If Jev errors, times out, or returns an answer that does not validate (an
-  unknown choice, probabilities that do not sum to one, a choice that
-  disagrees with its own probabilities), that fork goes to Opus instead.
+- If Jev errors, times out, or returns an answer that does not validate (a
+  missing answer, the wrong answer type, a probability outside 0 to 1), a
+  review goes to Opus instead, and a file pick suggests nothing.
 
 ## Differences from the prototype
 
+- The prototype asked Jev "done, retry, or escalate?" after every attempt,
+  with the helper's own `check_passed` in hand. In practice Jev's answer
+  matched "done if the helper said it passed, else escalate" in 49 of 50
+  forks. The port runs the check itself, lets rules settle failures, and
+  asks Jev the question rules cannot answer: does a passing change meet
+  `done_when`?
+- Jev file picks are slice 3 of the prototype's plan, which it never built.
 - Claude sessions run on jcode's agent runtime instead of the Claude Agent
   SDK, so they use jcode's tools (`read`, `agentgrep`, `edit`, `bash`, ...).
   The planner, judge, and reviser get read-only tools, the reviewer can also

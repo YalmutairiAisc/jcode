@@ -26,11 +26,29 @@ pub struct HelperReport {
     pub check_output_tail: String,
     #[serde(default)]
     pub blocker: String,
+    /// What the loop saw when it ran `check_command` itself. Never read from
+    /// the helper's reply, so a helper cannot claim it.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub loop_check: Option<LoopCheck>,
+    /// The session ended before the helper reported (a cap, the budget, or
+    /// an error). Set by the loop only.
+    #[serde(skip)]
+    pub stopped: Option<Stop>,
+}
+
+/// Why a helper session ended without a usable report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// A code limit (the tool-call cap or the spending cap) stopped it.
+    Limit,
+    /// The session failed (for example the provider was overloaded) or
+    /// ended without a valid report.
+    Error,
 }
 
 impl HelperReport {
     /// The original's fallback when a helper ends without a valid report.
-    pub fn stopped(output_tail: &str, blocker: impl Into<String>) -> Self {
+    pub fn stopped(output_tail: &str, blocker: impl Into<String>, why: Stop) -> Self {
         Self {
             summary: "Helper stopped before reporting.".into(),
             files_changed: Vec::new(),
@@ -38,8 +56,234 @@ impl HelperReport {
             check_passed: false,
             check_output_tail: super::fork::tail(output_tail, 2000),
             blocker: blocker.into(),
+            loop_check: None,
+            stopped: Some(why),
         }
     }
+
+    /// The check result the loop acts on. The loop's own run of the check
+    /// outranks the helper's claim. When the loop could not run it, a claimed
+    /// failure is believed (it can only lead to another attempt), but a
+    /// claimed pass is not: nobody saw it pass. Where the loop cannot run
+    /// checks at all (Windows, for now), the claim stands, as in the
+    /// prototype.
+    pub fn check_status(&self) -> CheckStatus {
+        match self.loop_check.as_ref().map(|check| check.result) {
+            Some(CheckResult::Passed) => CheckStatus::Passed,
+            Some(CheckResult::Failed) => CheckStatus::Failed,
+            Some(CheckResult::Unsupported) if self.check_passed => CheckStatus::Passed,
+            _ if !self.check_passed => CheckStatus::Failed,
+            _ => CheckStatus::Unverified,
+        }
+    }
+
+    /// Whether the helper reported a real blocker. Short notes such as
+    /// "none", "N/A", or "none - all good" do not count; "None of the tests
+    /// can run without a database" does.
+    pub fn has_blocker(&self) -> bool {
+        let text = self.blocker.trim().to_lowercase();
+        let words: Vec<&str> = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '/'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let empty = match words.first() {
+            None => true,
+            Some(first) => {
+                (matches!(*first, "none" | "n/a" | "na" | "null" | "nothing") && words.len() <= 3)
+                    || words == ["no"]
+                    || text.starts_with("no blocker")
+            }
+        };
+        !empty
+    }
+
+    /// The failure a retry carries and the same-error rule compares: why the
+    /// session stopped, else the loop's own check output, else what the
+    /// helper said.
+    pub fn error_text(&self) -> String {
+        if self.stopped.is_some() {
+            return self.blocker.clone();
+        }
+        match &self.loop_check {
+            Some(check) if check.result == CheckResult::NotRun => {
+                return format!("the loop could not run the check: {}", check.why_not_run);
+            }
+            Some(check) if check.result == CheckResult::Failed => {
+                return if check.output_tail.trim().is_empty() {
+                    format!("(no output; the check {})", check.describe())
+                } else {
+                    check.output_tail.clone()
+                };
+            }
+            _ => {}
+        }
+        [&self.check_output_tail, &self.blocker]
+            .into_iter()
+            .find(|text| !text.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "(no error output was reported)".into())
+    }
+}
+
+/// What happened when the loop ran a helper's check command itself.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LoopCheck {
+    pub result: CheckResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub why_not_run: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output_tail: String,
+    pub seconds: f64,
+}
+
+impl LoopCheck {
+    pub fn not_run(why: impl Into<String>) -> Self {
+        Self {
+            result: CheckResult::NotRun,
+            exit_code: None,
+            timed_out: false,
+            why_not_run: why.into(),
+            output_tail: String::new(),
+            seconds: 0.0,
+        }
+    }
+
+    pub fn finished(
+        passed: bool,
+        exit_code: Option<i32>,
+        output_tail: String,
+        seconds: f64,
+    ) -> Self {
+        Self {
+            result: if passed {
+                CheckResult::Passed
+            } else {
+                CheckResult::Failed
+            },
+            exit_code,
+            timed_out: false,
+            why_not_run: String::new(),
+            output_tail,
+            seconds,
+        }
+    }
+
+    pub fn timed_out(output_tail: String, seconds: f64) -> Self {
+        Self {
+            timed_out: true,
+            ..Self::finished(false, None, output_tail, seconds)
+        }
+    }
+
+    /// The loop cannot run checks on this platform; the helper's claim is
+    /// used instead.
+    pub fn unsupported() -> Self {
+        Self {
+            result: CheckResult::Unsupported,
+            why_not_run: "the loop runs checks itself only on Unix".into(),
+            ..Self::not_run("")
+        }
+    }
+
+    /// One line for progress output and the fork log.
+    pub fn describe(&self) -> String {
+        match self.result {
+            CheckResult::Passed => format!("passed in {:.1}s", self.seconds),
+            CheckResult::Failed if self.timed_out => {
+                format!("FAILED (timed out after {:.0}s)", self.seconds)
+            }
+            CheckResult::Failed => match self.exit_code {
+                Some(code) => format!("FAILED (exit {code})"),
+                None => "FAILED (killed by a signal)".into(),
+            },
+            CheckResult::NotRun => format!("not run: {}", self.why_not_run),
+            CheckResult::Unsupported => {
+                format!("not run ({}; the helper's claim is used)", self.why_not_run)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckResult {
+    Passed,
+    Failed,
+    NotRun,
+    /// The platform cannot run checks (Windows): the claim is used.
+    Unsupported,
+}
+
+/// The check result a decision is based on (see [`HelperReport::check_status`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Passed,
+    Failed,
+    Unverified,
+}
+
+impl CheckStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
+/// Whether two failures are the same error. Standalone numbers (timings,
+/// counts, line numbers, temp directory suffixes, addresses) are ignored,
+/// so a test that fails the same way twice matches. Digits inside names
+/// (`test_case_1`) still count, so a different failing test or a different
+/// message does not match.
+pub fn same_error(previous: &str, current: &str) -> bool {
+    let (previous, current) = (normalize_error(previous), normalize_error(current));
+    let tail = |text: &str| -> String {
+        let count = text.chars().count();
+        text.chars().skip(count.saturating_sub(1500)).collect()
+    };
+    tail(&previous) == tail(&current)
+}
+
+fn normalize_error(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut previous: Option<char> = None;
+    while let Some(c) = chars.next() {
+        let in_name = previous.is_some_and(|p| p.is_alphanumeric() || p == '_');
+        if c.is_ascii_digit() && !in_name {
+            let mut last = c;
+            let hex = c == '0' && chars.peek().is_some_and(|next| matches!(next, 'x' | 'X'));
+            if hex {
+                chars.next();
+            }
+            while let Some(&next) = chars
+                .peek()
+                .filter(|next| next.is_ascii_digit() || (hex && next.is_ascii_hexdigit()))
+            {
+                chars.next();
+                last = next;
+            }
+            normalized.push('#');
+            previous = Some(last);
+            continue;
+        }
+        if c.is_whitespace() {
+            if !normalized.ends_with(' ') {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.extend(c.to_lowercase());
+        }
+        previous = Some(c);
+    }
+    normalized.trim().to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

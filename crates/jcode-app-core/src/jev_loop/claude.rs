@@ -6,6 +6,8 @@
 //! Each call is a fresh, isolated jcode session with its own model, effort,
 //! system prompt, tool allowlist, and a guarded tool registry that enforces
 //! blocked commands, a tool-call cap, and (for helpers) a spending cap.
+//!
+//! `hint` arguments carry Jev's file picks (empty when there are none).
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -50,9 +52,17 @@ pub struct SessionResult {
 /// The Claude side of the loop. Mocked in tests.
 #[async_trait]
 pub trait ClaudeCalls: Send + Sync {
-    async fn make_plan(&self, task: &str) -> Result<(Vec<StepSpec>, f64)>;
-    async fn run_helper(&self, step: &StepSpec, feedback: &str) -> (HelperReport, f64);
-    async fn judge(&self, step: &StepSpec, report: &HelperReport, attempt: u32) -> (Judgment, f64);
+    async fn make_plan(&self, task: &str, hint: &str) -> Result<(Vec<StepSpec>, f64)>;
+    async fn run_helper(&self, step: &StepSpec, feedback: &str, hint: &str) -> (HelperReport, f64);
+    /// Judge an attempt whose check the loop ran and saw pass. `diff` is
+    /// what the step changed.
+    async fn judge(
+        &self,
+        step: &StepSpec,
+        report: &HelperReport,
+        attempt: u32,
+        diff: &str,
+    ) -> (Judgment, f64);
     async fn revise(&self, step: &StepSpec, history: &[AttemptRecord]) -> (Revision, f64);
     async fn review(&self, task: &str, step_log: &[StepLogEntry]) -> (String, f64);
 }
@@ -61,6 +71,10 @@ pub trait ClaudeCalls: Send + Sync {
 pub struct AttemptRecord {
     pub attempt: u32,
     pub report: HelperReport,
+    /// What the loop decided about this attempt, and why.
+    pub decision: Outcome,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -202,16 +216,15 @@ impl JcodeClaude {
 
 #[async_trait]
 impl ClaudeCalls for JcodeClaude {
-    async fn make_plan(&self, task: &str) -> Result<(Vec<StepSpec>, f64)> {
+    async fn make_plan(&self, task: &str, hint: &str) -> Result<(Vec<StepSpec>, f64)> {
         let spec = self.planner(
             "planner",
             format!("{PLAN_RULES}\n{PLAN_FORMAT}"),
             READ_ONLY_TOOLS,
             self.config.plan_max_tool_calls,
         );
-        let result = self
-            .run_session(spec, &format!("Plan this request:\n\n{task}"))
-            .await;
+        let prompt = with_hint(format!("Plan this request:\n\n{task}"), hint);
+        let result = self.run_session(spec, &prompt).await;
         if let Some(error) = result.error.as_deref().filter(|_| result.text.is_empty()) {
             anyhow::bail!("Planning failed: {error}");
         }
@@ -219,7 +232,7 @@ impl ClaudeCalls for JcodeClaude {
         Ok((steps, result.cost_usd))
     }
 
-    async fn run_helper(&self, step: &StepSpec, feedback: &str) -> (HelperReport, f64) {
+    async fn run_helper(&self, step: &StepSpec, feedback: &str, hint: &str) -> (HelperReport, f64) {
         let spec = SessionSpec {
             role: "helper",
             model: &self.config.helper_model,
@@ -233,6 +246,7 @@ impl ClaudeCalls for JcodeClaude {
             "Step {}: {}\n\nDone when: {}",
             step.id, step.task, step.done_when
         );
+        prompt = with_hint(prompt, hint);
         if !feedback.is_empty() {
             prompt.push_str(&format!(
                 "\n\nYour previous attempt did not finish this step:\n{feedback}"
@@ -242,31 +256,50 @@ impl ClaudeCalls for JcodeClaude {
         let report = match report::parse_helper_report(&result.text) {
             Ok(report) if result.stopped.is_none() => report,
             parsed => {
-                let why = result
+                // A code limit (tool-call or spending cap) is the step's
+                // problem; anything else is the session's.
+                let why = if result.stopped.is_some() {
+                    report::Stop::Limit
+                } else {
+                    report::Stop::Error
+                };
+                let reason = result
                     .stopped
                     .clone()
                     .or_else(|| result.error.clone())
                     .or_else(|| parsed.err().map(|error| format!("{error:#}")))
                     .unwrap_or_else(|| "no report".into());
-                HelperReport::stopped(&result.text, format!("Session ended with: {why}"))
+                HelperReport::stopped(&result.text, format!("Session ended with: {reason}"), why)
             }
         };
         (report, result.cost_usd)
     }
 
-    async fn judge(&self, step: &StepSpec, helper: &HelperReport, attempt: u32) -> (Judgment, f64) {
+    async fn judge(
+        &self,
+        step: &StepSpec,
+        helper: &HelperReport,
+        attempt: u32,
+        diff: &str,
+    ) -> (Judgment, f64) {
         let spec = self.planner(
             "judge",
             JUDGE_FORMAT.to_string(),
             READ_ONLY_TOOLS,
             self.config.judge_max_tool_calls,
         );
+        let changes = if diff.trim().is_empty() {
+            "(no file changes)".to_string()
+        } else {
+            diff.to_string()
+        };
         let prompt = format!(
-            "A helper just attempted one step. Decide what happens next.\n\
-             done = the step's goal is met and its check passed.\n\
+            "A helper just attempted one step. The loop ran the helper's check command \
+             itself and it passed (loop_check in the report). Decide what happens next.\n\
+             done = the change does what the step asks and meets every part of done_when.\n\
              retry = a fresh attempt with the error in hand will likely fix it.\n\
              escalate = it needs a different approach or a decision.\n\n\
-             Step: {}\nAttempt: {attempt}\nHelper report: {}",
+             Step: {}\nAttempt: {attempt}\nHelper report: {}\n\nWhat the step changed:\n{changes}",
             to_json(step),
             to_json(helper)
         );
@@ -488,6 +521,15 @@ fn to_json<T: serde::Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
 }
 
+/// Add Jev's file picks to a prompt, if there are any.
+fn with_hint(prompt: String, hint: &str) -> String {
+    if hint.trim().is_empty() {
+        prompt
+    } else {
+        format!("{prompt}\n\n{hint}")
+    }
+}
+
 /// Why a session's reply could not be used: the session's own error (for
 /// example the model declining the request) when it ended with no text,
 /// otherwise the parse error.
@@ -525,7 +567,12 @@ When you are done, reply with only this JSON object and nothing after it:
 const HELPER_RULES: &str = "\
 You are a helper doing ONE step of a larger plan. Do only this step.
 When you finish, run the step's check yourself and report honestly.
-If the check fails, say so and include the end of the error output.";
+If the check fails, say so and include the end of the error output.
+The loop runs your check_command again itself, from the repository root,
+after you finish, and decides on what it sees. So report one complete shell
+command that runs the check from the repository root: every environment
+variable, interpreter path, and file it needs, with no placeholders. Leave
+blocker empty unless something outside this step stops you from finishing it.";
 
 const REPORT_FORMAT: &str = "\
 End your reply with only this JSON object:

@@ -174,13 +174,14 @@ fn passing_report() -> HelperReport {
         check_passed: true,
         check_output_tail: "1 passed".into(),
         blocker: String::new(),
+        ..HelperReport::default()
     }
 }
 
 async fn judge_with(provider: &ReadsUntilToldProvider) -> super::report::Judgment {
     let repo = tempfile::tempdir().expect("repo dir");
     let claude = claude_for(provider, repo.path());
-    let (judgment, _cost) = claude.judge(&step(), &passing_report(), 1).await;
+    let (judgment, _cost) = claude.judge(&step(), &passing_report(), 1, "").await;
     judgment
 }
 
@@ -293,9 +294,10 @@ async fn helper_keeps_the_hard_stop_at_its_cap() {
         },
     );
 
-    let (report, _cost) = claude.run_helper(&step(), "").await;
+    let (report, _cost) = claude.run_helper(&step(), "", "").await;
 
     assert!(!report.check_passed);
+    assert_eq!(report.stopped, Some(super::report::Stop::Limit));
     assert!(
         report.blocker.contains("tool-call limit reached (3 calls)"),
         "{}",

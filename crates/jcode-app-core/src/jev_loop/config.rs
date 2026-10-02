@@ -6,7 +6,8 @@
 //! `JCODE_JEV_LOOP_PLANNER_EFFORT`, `JCODE_JEV_LOOP_HELPER_EFFORT`,
 //! `JCODE_JEV_LOOP_THRESHOLD`, `JCODE_JEV_LOOP_MAX_ATTEMPTS`,
 //! `JCODE_JEV_LOOP_MAX_REVISIONS`, `JCODE_JEV_LOOP_HELPER_MAX_TOOL_CALLS`,
-//! `JCODE_JEV_LOOP_STEP_BUDGET_USD`, and `JCODE_JEV_LOOP_FORK_LOG`.
+//! `JCODE_JEV_LOOP_STEP_BUDGET_USD`, `JCODE_JEV_LOOP_CHECK_TIMEOUT_SECS`,
+//! `JCODE_JEV_LOOP_FORK_LOG`, and one tool-call cap per planner role.
 
 use std::path::PathBuf;
 
@@ -40,6 +41,18 @@ pub const PLAN_MAX_TOOL_CALLS: u32 = 40;
 /// responses, not calls, means a response that batches several reads cannot
 /// use up the grace before the model has seen a refusal.
 pub const ANSWER_GRACE_RESPONSES: u32 = 2;
+
+/// Longest the loop waits when it runs a helper's check command itself.
+/// The bash tool's own ceiling is the same 10 minutes.
+pub const CHECK_TIMEOUT_SECS: u64 = 600;
+
+/// Files a keyword search may hand Jev per file pick (one request; every
+/// Jev route accepts at least 24 questions).
+pub const MAX_PICK_CANDIDATES: usize = 24;
+/// Most files Jev may suggest to the planner or a helper.
+pub const MAX_PICKED_FILES: usize = 10;
+/// Jev's probability that a file is needed, at or above which it is suggested.
+pub const PICK_THRESHOLD: f64 = 0.5;
 
 /// Fork log file name. The loop writes it under `~/.jcode/jev-loop/` (not
 /// inside the target repo, where it would dirty the tree the loop edits).
@@ -178,6 +191,8 @@ pub struct LoopConfig {
     pub revise_max_tool_calls: u32,
     pub review_max_tool_calls: u32,
     pub step_budget_usd: f64,
+    /// Seconds the loop gives a helper's check command when it runs it.
+    pub check_timeout_secs: u64,
     pub fork_log: PathBuf,
 }
 
@@ -197,6 +212,7 @@ impl Default for LoopConfig {
             revise_max_tool_calls: REVISE_MAX_TOOL_CALLS,
             review_max_tool_calls: REVIEW_MAX_TOOL_CALLS,
             step_budget_usd: STEP_BUDGET_USD,
+            check_timeout_secs: CHECK_TIMEOUT_SECS,
             fork_log: PathBuf::from(FORK_LOG),
         }
     }
@@ -290,6 +306,10 @@ impl LoopConfig {
                 "JCODE_JEV_LOOP_STEP_BUDGET_USD must be greater than zero"
             );
             config.step_budget_usd = budget;
+        }
+        if let Some(v) = text("JCODE_JEV_LOOP_CHECK_TIMEOUT_SECS")? {
+            config.check_timeout_secs =
+                u64::from(parse_positive("JCODE_JEV_LOOP_CHECK_TIMEOUT_SECS", &v)?);
         }
         if let Some(v) = text("JCODE_JEV_LOOP_FORK_LOG")?.filter(|v| !v.is_empty()) {
             config.fork_log = PathBuf::from(v);
