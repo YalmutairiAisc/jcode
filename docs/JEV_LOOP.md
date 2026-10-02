@@ -273,11 +273,11 @@ Invalid values are rejected at startup instead of being ignored.
 Ctrl+C ends the loop, but not every command it started. Each helper command
 runs in a session of its own, and the loop's own check runs in a process
 group of its own, so neither receives the terminal's Ctrl+C. Measured on
-Linux with the real binary: after Ctrl+C a child left in the loop's process
-group stopped, while a child in its own group and one in its own session both
-kept running and writing. `kill` on the loop's process ID alone is worse: it
-stops only the loop. A long test suite or build can therefore outlive the
-loop, still using CPU and disk.
+Linux with the real binary and a real helper command (a local stand-in model
+made the helper start a long-running command through the bash tool): after
+Ctrl+C, and equally after `kill` on the loop's process ID, the loop exited
+while the helper's command kept running and writing. A long test suite or
+build can therefore outlive the loop, still using CPU and disk.
 
 To stop everything, collect the loop's processes while the loop is still
 running, then signal them all:
