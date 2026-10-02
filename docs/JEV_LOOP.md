@@ -270,30 +270,27 @@ Invalid values are rejected at startup instead of being ignored.
 
 ## Stopping a run
 
-Ctrl+C ends the loop, but not every command it started. Each helper command
-runs in a session of its own, and the loop's own check runs in a process
-group of its own, so neither receives the terminal's Ctrl+C. Measured on
-Linux with the real binary and a real helper command (a local stand-in model
-made the helper start a long-running command through the bash tool): after
-Ctrl+C, and equally after `kill` on the loop's process ID, the loop exited
-while the helper's command kept running and writing. A long test suite or
-build can therefore outlive the loop, still using CPU and disk.
+Press Ctrl+C, or send the loop SIGTERM (`kill <pid>`), to stop a run. The
+loop then stops everything it started, not just itself: it cancels every
+session's turn, stops each helper's commands (the bash tool runs each one in
+a session of its own, which the terminal's Ctrl+C never reaches), and kills
+its own check run (a process group of its own). It prints
+`jev-loop: Ctrl+C received, stopped the run and N command(s) it had started.`
+and exits `130` (Ctrl+C) or `143` (SIGTERM).
 
-To stop everything, collect the loop's processes while the loop is still
-running, then signal them all:
+The same cleanup runs when a run ends normally, and whenever one helper,
+judge, or reviewer session ends, any command it left running in the
+background (for example a test suite that outlived its foreground time
+limit) is stopped with it.
 
-```bash
-setsid --wait jcode jev-loop --repo ~/code/myproject --task "..."
-# elsewhere, with LOOP set to the loop's process ID, list every descendant
-# of LOOP (follow ppid links down from LOOP) plus every process whose sid is LOOP:
-ps -eo pid=,ppid=,sid=
-```
+Measured on Linux with the real binary and a real helper command (a local
+stand-in model made the helper start a long-running command through the bash
+tool): before this, the loop exited on Ctrl+C or `kill` while the helper's
+command kept running and writing to disk; now both stop.
 
-`kill -TERM` every process in that list, then `kill -KILL` any still running
-a few seconds later. Order matters: a helper command has its own session, so
-once the loop has exited it is reparented and nothing links it to the loop
-any more. Processes that stayed in the loop's session (what `setsid --wait`
-adds) remain findable by session ID even then.
+`kill -KILL` cannot be caught, so after SIGKILL the loop can clean nothing up.
+Helper commands then keep running; stop them by their session or process
+group, or use SIGTERM first.
 
 ## Safety note
 

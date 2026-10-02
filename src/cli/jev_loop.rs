@@ -107,7 +107,23 @@ pub(crate) async fn run_jev_loop_command(
         workspace: &workspace,
     };
     let mut stdout = std::io::stdout();
-    let summary = jev_loop::run(&options, parts, &mut stdout).await?;
+    // Ctrl+C reaches only the loop's own process group. Helper commands run
+    // in sessions of their own and the check in a group of its own, so the
+    // loop stops them itself, on a signal and when the run ends.
+    let outcome = tokio::select! {
+        summary = jev_loop::run(&options, parts, &mut stdout) => Ok(summary),
+        signal = jev_loop::stop::interrupted() => Err(signal),
+    };
+    let stopped = jev_loop::stop::stop_all(outcome.is_err()).await;
+    let summary = match outcome {
+        Ok(summary) => summary?,
+        Err(signal) => {
+            eprintln!(
+                "\njev-loop: {signal} received, stopped the run and {stopped} command(s) it had started."
+            );
+            std::process::exit(jev_loop::stop::signal_exit_code(signal));
+        }
+    };
     if !summary.finished {
         std::process::exit(summary.exit_code());
     }

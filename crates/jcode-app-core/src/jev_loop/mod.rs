@@ -23,6 +23,7 @@ pub mod fork;
 pub mod guard;
 pub mod pick;
 pub mod report;
+pub mod stop;
 pub mod workspace;
 
 pub use claude::{ClaudeCalls, JcodeClaude};
@@ -79,3 +80,6 @@ mod cap_tests;
 
 #[cfg(test)]
 mod workspace_tests;
+
+#[cfg(test)]
+mod stop_tests;

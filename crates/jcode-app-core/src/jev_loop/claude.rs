@@ -171,10 +171,21 @@ impl JcodeClaude {
         agent.set_debug(true);
         agent.set_system_prompt(&system_prompt(&spec.rules, &self.repo));
         guard.attach_cancel(agent.graceful_shutdown_signal());
+        let session_id = agent.session_id().to_string();
+        super::stop::track_session(&session_id, agent.graceful_shutdown_signal());
 
         let model = agent.provider_model();
         let price_key = price_source_key(self.provider.name());
         let (run, meter) = run_metered(&mut agent, prompt, &guard, &price_key, &model).await;
+        // A command that outlived its foreground time limit is now a
+        // background task nothing will wait for. Stop it with its session.
+        let leftovers = super::stop::stop_session_tasks(&session_id).await;
+        if leftovers > 0 {
+            crate::logging::info(&format!(
+                "jev-loop: stopped {leftovers} background command(s) the {} left running",
+                spec.role
+            ));
+        }
         let TurnMeter {
             usage,
             text,

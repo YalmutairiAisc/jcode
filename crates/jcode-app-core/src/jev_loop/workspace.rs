@@ -431,6 +431,11 @@ async fn run_check_in(repo: &Path, command: &str, limit: Duration) -> LoopCheck 
         Err(error) => return LoopCheck::not_run(format!("could not start bash: {error}")),
     };
     let pid = child.id();
+    // Ctrl+C never reaches this group (it is not the terminal's foreground
+    // group), so record it for `stop::stop_all` until it is killed below.
+    if let Some(pid) = pid {
+        super::stop::check_started(pid);
+    }
     let output = Arc::new(Mutex::new(Vec::new()));
     let reader = child
         .stdout
@@ -440,6 +445,7 @@ async fn run_check_in(repo: &Path, command: &str, limit: Duration) -> LoopCheck 
     // Stop whatever the check left running, and everything on a timeout.
     if let Some(pid) = pid {
         kill_group(pid);
+        super::stop::check_finished(pid);
     }
     if status.is_err()
         && let Err(error) = child.wait().await
