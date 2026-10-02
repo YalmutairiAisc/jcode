@@ -155,4 +155,6 @@ async fn a_running_check_is_tracked_and_forgotten_when_it_ends() {
 fn signals_exit_with_the_codes_shells_use() {
     assert_eq!(stop::signal_exit_code("Ctrl+C"), 130);
     assert_eq!(stop::signal_exit_code("SIGTERM"), 143);
+    assert_eq!(stop::signal_exit_code("SIGHUP"), 129);
+    assert_eq!(stop::signal_exit_code("SIGQUIT"), 131);
 }

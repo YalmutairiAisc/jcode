@@ -112,13 +112,17 @@ pub async fn stop_all(interrupted: bool) -> usize {
     for cancel in &cancels {
         cancel.fire();
     }
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut stopped_checks = 0;
     #[cfg(unix)]
     for pgid in groups {
-        let _ = crate::platform::signal_detached_process_group(pgid, libc::SIGKILL);
+        if crate::platform::signal_detached_process_group(pgid, libc::SIGKILL).is_ok() {
+            stopped_checks += 1;
+        }
     }
     #[cfg(not(unix))]
     let _ = groups;
-    let mut stopped = 0;
+    let mut stopped = stopped_checks;
     let passes = if interrupted { 2 } else { 1 };
     for pass in 0..passes {
         if pass > 0 {
@@ -131,7 +135,10 @@ pub async fn stop_all(interrupted: bool) -> usize {
     stopped
 }
 
-/// Wait for Ctrl+C or SIGTERM. Never returns on platforms without them.
+/// Wait for a signal that ends the run: Ctrl+C (SIGINT), SIGTERM (`kill`),
+/// a closed terminal (SIGHUP), or Ctrl+\ (SIGQUIT). Measured before this
+/// handled SIGHUP: closing the terminal killed the loop and left a helper's
+/// command running. Never returns on platforms without these signals.
 pub async fn interrupted() -> &'static str {
     #[cfg(unix)]
     {
@@ -139,11 +146,17 @@ pub async fn interrupted() -> &'static str {
         match (
             signal(SignalKind::interrupt()),
             signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+            signal(SignalKind::quit()),
         ) {
-            (Ok(mut interrupt), Ok(mut terminate)) => tokio::select! {
-                _ = interrupt.recv() => "Ctrl+C",
-                _ = terminate.recv() => "SIGTERM",
-            },
+            (Ok(mut interrupt), Ok(mut terminate), Ok(mut hangup), Ok(mut quit)) => {
+                tokio::select! {
+                    _ = interrupt.recv() => "Ctrl+C",
+                    _ = terminate.recv() => "SIGTERM",
+                    _ = hangup.recv() => "SIGHUP",
+                    _ = quit.recv() => "SIGQUIT",
+                }
+            }
             _ => std::future::pending().await,
         }
     }
@@ -159,6 +172,8 @@ pub async fn interrupted() -> &'static str {
 /// Exit code for a run stopped by a signal, as shells report it.
 pub fn signal_exit_code(signal: &str) -> i32 {
     match signal {
+        "SIGHUP" => 129,
+        "SIGQUIT" => 131,
         "SIGTERM" => 143,
         _ => 130,
     }

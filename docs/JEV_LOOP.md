@@ -270,13 +270,15 @@ Invalid values are rejected at startup instead of being ignored.
 
 ## Stopping a run
 
-Press Ctrl+C, or send the loop SIGTERM (`kill <pid>`), to stop a run. The
-loop then stops everything it started, not just itself: it cancels every
-session's turn, stops each helper's commands (the bash tool runs each one in
-a session of its own, which the terminal's Ctrl+C never reaches), and kills
-its own check run (a process group of its own). It prints
+Press Ctrl+C, press Ctrl+\, close the terminal, or send the loop SIGTERM
+(`kill <pid>`) to stop a run. The loop then stops everything it started, not
+just itself: it cancels every session's turn, stops each helper's commands
+(the bash tool runs each one in a session of its own, which the terminal's
+Ctrl+C never reaches), and kills its own check run (a process group of its
+own). It prints
 `jev-loop: Ctrl+C received, stopped the run and N command(s) it had started.`
-and exits `130` (Ctrl+C) or `143` (SIGTERM).
+and exits `130` (Ctrl+C), `131` (Ctrl+\), `129` (terminal closed), or `143`
+(SIGTERM).
 
 The same cleanup runs when a run ends normally, and whenever one helper,
 judge, or reviewer session ends, any command it left running in the
@@ -285,8 +287,9 @@ limit) is stopped with it.
 
 Measured on Linux with the real binary and a real helper command (a local
 stand-in model made the helper start a long-running command through the bash
-tool): before this, the loop exited on Ctrl+C or `kill` while the helper's
-command kept running and writing to disk; now both stop.
+tool), each way of stopping was checked in a real terminal: before this,
+the loop exited on Ctrl+C, Ctrl+\, `kill`, or a closed terminal while the
+helper's command kept running and writing to disk; now everything stops.
 
 `kill -KILL` cannot be caught, so after SIGKILL the loop can clean nothing up.
 Helper commands then keep running; stop them by their session or process

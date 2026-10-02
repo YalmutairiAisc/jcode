@@ -118,7 +118,11 @@ pub(crate) async fn run_jev_loop_command(
     let summary = match outcome {
         Ok(summary) => summary?,
         Err(signal) => {
-            eprintln!(
+            // After SIGHUP the terminal is gone and eprintln! would panic;
+            // the cleanup above already ran, so a failed write is ignored.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
                 "\njev-loop: {signal} received, stopped the run and {stopped} command(s) it had started."
             );
             std::process::exit(jev_loop::stop::signal_exit_code(signal));
